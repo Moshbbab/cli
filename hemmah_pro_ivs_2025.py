@@ -220,8 +220,10 @@ class HemmahDataEngine:
         if price_cols and area_cols:
             df["price_per_sqm"] = df[price_cols[0]] / df[area_cols[0]]
             # إزالة الشواذ الشديدة
-            df = df[df["price_per_sqm"] < df["price_per_sqm"].quantile(0.995)]
-            df = df[df["price_per_sqm"] > df["price_per_sqm"].quantile(0.005)]
+            upper = df["price_per_sqm"].quantile(0.995)
+            lower = df["price_per_sqm"].quantile(0.005)
+            if pd.notna(upper) and pd.notna(lower) and lower < upper:
+                df = df[df["price_per_sqm"].between(lower, upper, inclusive="both")]
 
         # هندسة المتغيرات الجغرافية
         location_cols = [
@@ -240,6 +242,8 @@ class HemmahDataEngine:
                 tier_labels = ["E", "D", "C", "B", "A"]
 
                 def assign_tiers(series: pd.Series) -> pd.Series:
+                    if series.empty or series.dropna().nunique() < 2:
+                        return pd.Series(["C"] * len(series), index=series.index)
                     _, bins = pd.qcut(series, q=5, retbins=True, duplicates="drop")
                     label_count = max(len(bins) - 1, 1)
                     labels = tier_labels[-label_count:]

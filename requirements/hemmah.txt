@@ -1,0 +1,11 @@
+pandas
+numpy
+matplotlib
+scikit-learn
+shap
+xgboost
+ipywidgets
+ipython
+fpdf
+arabic-reshaper
+python-bidi

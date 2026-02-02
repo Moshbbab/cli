@@ -56,3 +56,8 @@ Hemmah_Test_Report.pdf
 ```
 
 in the current working directory.
+
+## Notes on resource loading
+
+- The PDF generator tries to load `Amiri-Regular.ttf` and `Amiri-Bold.ttf` from the current working directory. If they are not present, the report falls back to Latin-1 safe English text to avoid `UnicodeEncodeError` in FPDF.
+- This module does not currently use Jinja2 templates; all report content is built in code.
