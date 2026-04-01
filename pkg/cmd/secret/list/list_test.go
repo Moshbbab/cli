@@ -3,14 +3,19 @@ package list
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	ghContext "github.com/cli/cli/v2/context"
+	"github.com/cli/cli/v2/git"
 	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/pkg/cmd/secret/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/httpmock"
@@ -96,6 +101,140 @@ func Test_NewCmdList(t *testing.T) {
 
 			assert.Equal(t, tt.wants.OrgName, gotOpts.OrgName)
 			assert.Equal(t, tt.wants.EnvName, gotOpts.EnvName)
+		})
+	}
+}
+
+func TestNewCmdListBaseRepoFuncs(t *testing.T) {
+	multipleRemotes := ghContext.Remotes{
+		&ghContext.Remote{
+			Remote: &git.Remote{
+				Name: "origin",
+			},
+			Repo: ghrepo.New("owner", "fork"),
+		},
+		&ghContext.Remote{
+			Remote: &git.Remote{
+				Name: "upstream",
+			},
+			Repo: ghrepo.New("owner", "repo"),
+		},
+	}
+
+	singleRemote := ghContext.Remotes{
+		&ghContext.Remote{
+			Remote: &git.Remote{
+				Name: "origin",
+			},
+			Repo: ghrepo.New("owner", "repo"),
+		},
+	}
+
+	tests := []struct {
+		name          string
+		args          string
+		env           map[string]string
+		remotes       ghContext.Remotes
+		prompterStubs func(*prompter.MockPrompter)
+		wantRepo      ghrepo.Interface
+		wantErr       error
+	}{
+		{
+			name:     "when there is a repo flag provided, the factory base repo func is used",
+			args:     "--repo owner/repo",
+			remotes:  multipleRemotes,
+			wantRepo: ghrepo.New("owner", "repo"),
+		},
+		{
+			name: "when GH_REPO env var is provided, the factory base repo func is used",
+			env: map[string]string{
+				"GH_REPO": "owner/repo",
+			},
+			remotes:  multipleRemotes,
+			wantRepo: ghrepo.New("owner", "repo"),
+		},
+		{
+			name:    "when there is no repo flag or GH_REPO env var provided, and no prompting, the base func requiring no ambiguity is used",
+			args:    "",
+			remotes: multipleRemotes,
+			wantErr: shared.AmbiguousBaseRepoError{
+				Remotes: multipleRemotes,
+			},
+		},
+		{
+			name:     "when there is no repo flag or GH_REPO env provided, and there is a single remote, the factory base repo func is used",
+			args:     "",
+			remotes:  singleRemote,
+			wantRepo: ghrepo.New("owner", "repo"),
+		},
+		{
+			name:    "when there is no repo flag or GH_REPO env var provided, and can prompt, the base func resolving ambiguity is used",
+			args:    "",
+			remotes: multipleRemotes,
+			prompterStubs: func(pm *prompter.MockPrompter) {
+				pm.RegisterSelect(
+					"Select a repo",
+					[]string{"owner/fork", "owner/repo"},
+					func(_, _ string, opts []string) (int, error) {
+						return prompter.IndexFor(opts, "owner/fork")
+					},
+				)
+			},
+			wantRepo: ghrepo.New("owner", "fork"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ios, _, _, _ := iostreams.Test()
+			var pm *prompter.MockPrompter
+			if tt.prompterStubs != nil {
+				ios.SetStdinTTY(true)
+				ios.SetStdoutTTY(true)
+				ios.SetStderrTTY(true)
+				pm = prompter.NewMockPrompter(t)
+				tt.prompterStubs(pm)
+			}
+
+			f := &cmdutil.Factory{
+				IOStreams: ios,
+				BaseRepo: func() (ghrepo.Interface, error) {
+					return ghrepo.FromFullName("owner/repo")
+				},
+				Prompter: pm,
+				Remotes: func() (ghContext.Remotes, error) {
+					return tt.remotes, nil
+				},
+			}
+
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+
+			argv, err := shlex.Split(tt.args)
+			assert.NoError(t, err)
+
+			var gotOpts *ListOptions
+			cmd := NewCmdList(f, func(opts *ListOptions) error {
+				gotOpts = opts
+				return nil
+			})
+			// Require to support --repo flag
+			cmdutil.EnableRepoOverride(cmd, f)
+			cmd.SetArgs(argv)
+			cmd.SetIn(&bytes.Buffer{})
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+
+			_, err = cmd.ExecuteC()
+			require.NoError(t, err)
+
+			baseRepo, err := gotOpts.BaseRepo()
+			if tt.wantErr != nil {
+				require.Equal(t, tt.wantErr, err)
+				return
+			}
+			require.True(t, ghrepo.IsSame(tt.wantRepo, baseRepo))
 		})
 	}
 }
@@ -418,7 +557,7 @@ func Test_listRun(t *testing.T) {
 			tt.opts.HttpClient = func() (*http.Client, error) {
 				return &http.Client{Transport: reg}, nil
 			}
-			tt.opts.Config = func() (config.Config, error) {
+			tt.opts.Config = func() (gh.Config, error) {
 				return config.NewBlankConfig(), nil
 			}
 			tt.opts.Now = func() time.Time {
@@ -611,7 +750,7 @@ func Test_listRun_populatesNumSelectedReposIfRequired(t *testing.T) {
 			opts.HttpClient = func() (*http.Client, error) {
 				return &http.Client{Transport: reg}, nil
 			}
-			opts.Config = func() (config.Config, error) {
+			opts.Config = func() (gh.Config, error) {
 				return config.NewBlankConfig(), nil
 			}
 			opts.Now = func() time.Time {

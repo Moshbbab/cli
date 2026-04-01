@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/pkg/cmd/issue/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -16,11 +16,11 @@ import (
 
 type TransferOptions struct {
 	HttpClient func() (*http.Client, error)
-	Config     func() (config.Config, error)
+	Config     func() (gh.Config, error)
 	IO         *iostreams.IOStreams
 	BaseRepo   func() (ghrepo.Interface, error)
 
-	IssueSelector    string
+	IssueNumber      int
 	DestRepoSelector string
 }
 
@@ -36,8 +36,23 @@ func NewCmdTransfer(f *cmdutil.Factory, runF func(*TransferOptions) error) *cobr
 		Short: "Transfer issue to another repository",
 		Args:  cmdutil.ExactArgs(2, "issue and destination repository are required"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			opts.BaseRepo = f.BaseRepo
-			opts.IssueSelector = args[0]
+			issueNumber, baseRepo, err := shared.ParseIssueFromArg(args[0])
+			if err != nil {
+				return err
+			}
+
+			// If the args provided the base repo then use that directly.
+			if baseRepo, present := baseRepo.Value(); present {
+				opts.BaseRepo = func() (ghrepo.Interface, error) {
+					return baseRepo, nil
+				}
+			} else {
+				// support `-R, --repo` override
+				opts.BaseRepo = f.BaseRepo
+			}
+
+			opts.IssueNumber = issueNumber
+
 			opts.DestRepoSelector = args[1]
 
 			if runF != nil {
@@ -57,7 +72,12 @@ func transferRun(opts *TransferOptions) error {
 		return err
 	}
 
-	issue, baseRepo, err := shared.IssueFromArgWithFields(httpClient, opts.BaseRepo, opts.IssueSelector, []string{"id", "number"})
+	baseRepo, err := opts.BaseRepo()
+	if err != nil {
+		return err
+	}
+
+	issue, err := shared.FindIssueOrPR(httpClient, baseRepo, opts.IssueNumber, []string{"id", "number"})
 	if err != nil {
 		return err
 	}
@@ -85,7 +105,7 @@ func issueTransfer(httpClient *http.Client, issueID string, destRepo ghrepo.Inte
 		destinationRepoID = r.ID
 	} else {
 		apiClient := api.NewClientFromHTTP(httpClient)
-		r, err := api.GitHubRepo(apiClient, destRepo)
+		r, err := api.IssueRepoInfo(apiClient, destRepo)
 		if err != nil {
 			return "", err
 		}

@@ -2,10 +2,12 @@ package diff
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"regexp"
 	"strings"
 	"unicode"
@@ -36,6 +38,7 @@ type DiffOptions struct {
 	Patch       bool
 	NameOnly    bool
 	BrowserMode bool
+	Exclude     []string
 }
 
 func NewCmdDiff(f *cmdutil.Factory, runF func(*DiffOptions) error) *cobra.Command {
@@ -51,13 +54,30 @@ func NewCmdDiff(f *cmdutil.Factory, runF func(*DiffOptions) error) *cobra.Comman
 		Use:   "diff [<number> | <url> | <branch>]",
 		Short: "View changes in a pull request",
 		Long: heredoc.Docf(`
-			View changes in a pull request. 
+			View changes in a pull request.
 
 			Without an argument, the pull request that belongs to the current branch
 			is selected.
-			
+
 			With %[1]s--web%[1]s flag, open the pull request diff in a web browser instead.
+
+			Use %[1]s--exclude%[1]s to filter out files matching a glob pattern. The pattern
+			uses forward slashes as path separators on all platforms. You can repeat
+			the flag to exclude multiple patterns.
 		`, "`"),
+		Example: heredoc.Doc(`
+			# See diff for current branch
+			$ gh pr diff
+
+			# See diff for a specific PR
+			$ gh pr diff 123
+
+			# Exclude files from diff output
+			$ gh pr diff --exclude '*.yml' --exclude 'generated/*'
+
+			# Exclude matching files by name
+			$ gh pr diff --name-only --exclude '*.generated.*'
+		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Finder = shared.NewFinder(f)
@@ -92,6 +112,7 @@ func NewCmdDiff(f *cmdutil.Factory, runF func(*DiffOptions) error) *cobra.Comman
 	cmd.Flags().BoolVar(&opts.Patch, "patch", false, "Display diff in patch format")
 	cmd.Flags().BoolVar(&opts.NameOnly, "name-only", false, "Display only names of changed files")
 	cmd.Flags().BoolVarP(&opts.BrowserMode, "web", "w", false, "Open the pull request diff in the browser")
+	cmd.Flags().StringSliceVarP(&opts.Exclude, "exclude", "e", nil, "Exclude files matching glob `patterns` from the diff")
 
 	return cmd
 }
@@ -135,6 +156,13 @@ func diffRun(opts *DiffOptions) error {
 	defer diffReadCloser.Close()
 
 	var diff io.Reader = diffReadCloser
+	if len(opts.Exclude) > 0 {
+		filtered, err := filterDiff(diff, opts.Exclude)
+		if err != nil {
+			return err
+		}
+		diff = filtered
+	}
 	if opts.IO.IsStdoutTTY() {
 		diff = sanitizedReader(diff)
 	}
@@ -190,7 +218,7 @@ func fetchDiff(httpClient *http.Client, baseRepo ghrepo.Interface, prNumber int,
 const lineBufferSize = 4096
 
 var (
-	colorHeader   = []byte("\x1b[1;38m")
+	colorHeader   = []byte("\x1b[1;37m")
 	colorAddition = []byte("\x1b[32m")
 	colorRemoval  = []byte("\x1b[31m")
 	colorReset    = []byte("\x1b[m")
@@ -274,11 +302,28 @@ func changedFilesNames(w io.Writer, r io.Reader) error {
 		return err
 	}
 
-	pattern := regexp.MustCompile(`(?:^|\n)diff\s--git.*\sb/(.*)`)
-	matches := pattern.FindAllStringSubmatch(string(diff), -1)
+	// This is kind of a gnarly regex. We're looking lines of the format:
+	// diff --git a/9114-triage b/9114-triage
+	// diff --git "a/hello-\360\237\230\200-world" "b/hello-\360\237\230\200-world"
+	//
+	// From these lines we would look to extract:
+	// 9114-triage
+	// "hello-\360\237\230\200-world"
+	//
+	// Note that the b/ is removed but in the second case the preceeding quote remains.
+	// This is important for how git handles filenames that would be quoted with core.quotePath.
+	// https://git-scm.com/docs/git-config#Documentation/git-config.txt-corequotePath
+	//
+	// Thus we capture the quote if it exists, and everything that follows the b/
+	// We then concatenate those two capture groups together which for the examples above would be:
+	// `` + 9114-triage
+	// `"`` + hello-\360\237\230\200-world"
+	//
+	// Where I'm using the `` to indicate a string to avoid confusion with the " character.
+	matches := diffHeaderRegexp.FindAllStringSubmatch(string(diff), -1)
 
 	for _, val := range matches {
-		name := strings.TrimSpace(val[1])
+		name := strings.TrimSpace(val[1] + val[2])
 		if _, err := w.Write([]byte(name + "\n")); err != nil {
 			return err
 		}
@@ -338,4 +383,68 @@ func (t sanitizer) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err e
 // isPrint reports if a rune is safe to be printed to a terminal
 func isPrint(r rune) bool {
 	return r == '\n' || r == '\r' || r == '\t' || unicode.IsPrint(r)
+}
+
+var diffHeaderRegexp = regexp.MustCompile(`(?:^|\n)diff\s--git.*\s("?)b/(.*)`)
+
+// filterDiff reads a unified diff and returns a new reader with file entries
+// matching any of the exclude patterns removed.
+func filterDiff(r io.Reader, excludePatterns []string) (io.Reader, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	var result bytes.Buffer
+	for _, section := range splitDiffSections(string(data)) {
+		name := extractFileName(section)
+		if name != "" && matchesAny(name, excludePatterns) {
+			continue
+		}
+		result.WriteString(section)
+	}
+	return &result, nil
+}
+
+// splitDiffSections splits a unified diff string into per-file sections.
+// Each section starts with "diff --git" and includes all content up to (but
+// not including) the next "diff --git" line.
+func splitDiffSections(diff string) []string {
+	marker := "\ndiff --git "
+	parts := strings.Split(diff, marker)
+	if len(parts) == 1 {
+		return []string{diff}
+	}
+	sections := make([]string, 0, len(parts))
+	for i, p := range parts {
+		if i == 0 {
+			if len(p) > 0 {
+				sections = append(sections, p+"\n")
+			}
+		} else {
+			sections = append(sections, "diff --git "+p)
+		}
+	}
+	return sections
+}
+
+func extractFileName(section string) string {
+	m := diffHeaderRegexp.FindStringSubmatch(section)
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSpace(m[1] + m[2])
+}
+
+func matchesAny(name string, excludePatterns []string) bool {
+	for _, p := range excludePatterns {
+		if matched, _ := path.Match(p, name); matched {
+			return true
+		}
+		// Also match against the basename so "*.yml" matches "dir/file.yml"
+		if matched, _ := path.Match(p, path.Base(name)); matched {
+			return true
+		}
+	}
+	return false
 }

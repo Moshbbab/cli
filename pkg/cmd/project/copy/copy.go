@@ -32,7 +32,7 @@ type copyConfig struct {
 
 type copyProjectMutation struct {
 	CopyProjectV2 struct {
-		ProjectV2 queries.Project `graphql:"projectV2"`
+		ProjectV2 queries.ProjectMutationQuery `graphql:"projectV2"`
 	} `graphql:"copyProjectV2(input:$input)"`
 }
 
@@ -42,8 +42,8 @@ func NewCmdCopy(f *cmdutil.Factory, runF func(config copyConfig) error) *cobra.C
 		Short: "Copy a project",
 		Use:   "copy [<number>]",
 		Example: heredoc.Doc(`
-			# copy project "1" owned by monalisa to github
-			gh project copy 1 --source-owner monalisa --target-owner github --title "a new project"
+			# Copy project "1" owned by monalisa to github
+			$ gh project copy 1 --source-owner monalisa --target-owner github --title "a new project"
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -134,7 +134,7 @@ func copyArgs(config copyConfig) (*copyProjectMutation, map[string]interface{}) 
 	}
 }
 
-func printResults(config copyConfig, project queries.Project) error {
+func printResults(config copyConfig, project queries.ProjectMutationQuery) error {
 	if !config.io.IsStdoutTTY() {
 		return nil
 	}

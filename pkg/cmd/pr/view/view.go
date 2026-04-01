@@ -10,6 +10,7 @@ import (
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/browser"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
@@ -22,6 +23,9 @@ import (
 type ViewOptions struct {
 	IO      *iostreams.IOStreams
 	Browser browser.Browser
+	// TODO projectsV1Deprecation
+	// Remove this detector since it is only used for test validation.
+	Detector fd.Detector
 
 	Finder   shared.PRFinder
 	Exporter cmdutil.Exporter
@@ -81,7 +85,7 @@ var defaultFields = []string{
 	"url", "number", "title", "state", "body", "author", "autoMergeRequest",
 	"isDraft", "maintainerCanModify", "mergeable", "additions", "deletions", "commitsCount",
 	"baseRefName", "headRefName", "headRepositoryOwner", "headRepository", "isCrossRepository",
-	"reviewRequests", "reviews", "assignees", "labels", "projectCards", "milestone",
+	"reviewRequests", "reviews", "assignees", "labels", "projectCards", "projectItems", "milestone",
 	"comments", "reactionGroups", "createdAt", "statusCheckRollup",
 }
 
@@ -89,6 +93,7 @@ func viewRun(opts *ViewOptions) error {
 	findOptions := shared.FindOptions{
 		Selector: opts.SelectorArg,
 		Fields:   defaultFields,
+		Detector: opts.Detector,
 	}
 	if opts.BrowserMode {
 		findOptions.Fields = []string{"url"}
@@ -144,7 +149,7 @@ func printRawPrPreview(io *iostreams.IOStreams, pr *api.PullRequest) error {
 
 	fmt.Fprintf(out, "title:\t%s\n", pr.Title)
 	fmt.Fprintf(out, "state:\t%s\n", prStateWithDraft(pr))
-	fmt.Fprintf(out, "author:\t%s\n", pr.Author.Login)
+	fmt.Fprintf(out, "author:\t%s\n", pr.Author.DisplayName())
 	fmt.Fprintf(out, "labels:\t%s\n", labels)
 	fmt.Fprintf(out, "assignees:\t%s\n", assignees)
 	fmt.Fprintf(out, "reviewers:\t%s\n", reviewers)
@@ -183,7 +188,7 @@ func printHumanPrPreview(opts *ViewOptions, baseRepo ghrepo.Interface, pr *api.P
 	fmt.Fprintf(out,
 		"%s • %s wants to merge %s into %s from %s • %s\n",
 		shared.StateTitleWithColor(cs, *pr),
-		pr.Author.Login,
+		pr.Author.DisplayName(),
 		text.Pluralize(pr.Commits.TotalCount, "commit"),
 		pr.BaseRefName,
 		pr.HeadRefName,
@@ -260,7 +265,7 @@ func printHumanPrPreview(opts *ViewOptions, baseRepo ghrepo.Interface, pr *api.P
 	var md string
 	var err error
 	if pr.Body == "" {
-		md = fmt.Sprintf("\n  %s\n\n", cs.Gray("No description provided"))
+		md = fmt.Sprintf("\n  %s\n\n", cs.Muted("No description provided"))
 	} else {
 		md, err = markdown.Render(pr.Body,
 			markdown.WithTheme(opts.IO.TerminalTheme()),
@@ -282,7 +287,7 @@ func printHumanPrPreview(opts *ViewOptions, baseRepo ghrepo.Interface, pr *api.P
 	}
 
 	// Footer
-	fmt.Fprintf(out, cs.Gray("View this pull request on GitHub: %s\n"), pr.URL)
+	fmt.Fprintf(out, cs.Muted("View this pull request on GitHub: %s\n"), pr.URL)
 
 	return nil
 }
@@ -346,7 +351,7 @@ func parseReviewers(pr api.PullRequest) []*reviewerState {
 
 	for _, review := range pr.Reviews.Nodes {
 		if review.Author.Login != pr.Author.Login {
-			name := review.Author.Login
+			name := review.AuthorLogin()
 			if name == "" {
 				name = ghostName
 			}
@@ -359,7 +364,7 @@ func parseReviewers(pr api.PullRequest) []*reviewerState {
 
 	// Overwrite reviewer's state if a review request for the same reviewer exists.
 	for _, reviewRequest := range pr.ReviewRequests.Nodes {
-		name := reviewRequest.RequestedReviewer.LoginOrSlug()
+		name := reviewRequest.RequestedReviewer.DisplayName()
 		reviewerStates[name] = &reviewerState{
 			Name:  name,
 			State: requestedReviewState,
@@ -401,7 +406,7 @@ func prAssigneeList(pr api.PullRequest) string {
 
 	AssigneeNames := make([]string, 0, len(pr.Assignees.Nodes))
 	for _, assignee := range pr.Assignees.Nodes {
-		AssigneeNames = append(AssigneeNames, assignee.Login)
+		AssigneeNames = append(AssigneeNames, assignee.DisplayName())
 	}
 
 	list := strings.Join(AssigneeNames, ", ")
@@ -423,7 +428,7 @@ func prLabelList(pr api.PullRequest, cs *iostreams.ColorScheme) string {
 
 	labelNames := make([]string, 0, len(pr.Labels.Nodes))
 	for _, label := range pr.Labels.Nodes {
-		labelNames = append(labelNames, cs.HexToRGB(label.Color, label.Name))
+		labelNames = append(labelNames, cs.Label(label.Color, label.Name))
 	}
 
 	list := strings.Join(labelNames, ", ")
@@ -434,11 +439,23 @@ func prLabelList(pr api.PullRequest, cs *iostreams.ColorScheme) string {
 }
 
 func prProjectList(pr api.PullRequest) string {
-	if len(pr.ProjectCards.Nodes) == 0 {
+	totalCount := pr.ProjectCards.TotalCount + pr.ProjectItems.TotalCount
+	count := len(pr.ProjectCards.Nodes) + len(pr.ProjectItems.Nodes)
+
+	if count == 0 {
 		return ""
 	}
 
 	projectNames := make([]string, 0, len(pr.ProjectCards.Nodes))
+
+	for _, project := range pr.ProjectItems.Nodes {
+		colName := project.Status.Name
+		if colName == "" {
+			colName = "No Status"
+		}
+		projectNames = append(projectNames, fmt.Sprintf("%s (%s)", project.Project.Title, colName))
+	}
+
 	for _, project := range pr.ProjectCards.Nodes {
 		if project == nil {
 			continue
@@ -451,7 +468,7 @@ func prProjectList(pr api.PullRequest) string {
 	}
 
 	list := strings.Join(projectNames, ", ")
-	if pr.ProjectCards.TotalCount > len(pr.ProjectCards.Nodes) {
+	if totalCount > count {
 		list += ", …"
 	}
 	return list

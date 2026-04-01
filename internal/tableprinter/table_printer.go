@@ -63,23 +63,24 @@ func NewWithWriter(w io.Writer, isTTY bool, maxWidth int, cs *iostreams.ColorSch
 	}
 
 	if isTTY && len(headers.columns) > 0 {
-		// Make sure all headers are uppercase.
+		// Make sure all headers are uppercase, taking a copy of the headers to avoid modifying the original slice.
+		upperCasedHeaders := make([]string, len(headers.columns))
 		for i := range headers.columns {
-			headers.columns[i] = strings.ToUpper(headers.columns[i])
+			upperCasedHeaders[i] = strings.ToUpper(headers.columns[i])
 		}
 
 		// Make sure all header columns are padded - even the last one. Previously, the last header column
 		// was not padded. In tests cs.Enabled() is false which allows us to avoid having to fix up
 		// numerous tests that verify header padding.
 		var paddingFunc func(int, string) string
-		if cs.Enabled() {
+		if cs.Enabled {
 			paddingFunc = text.PadRight
 		}
 
 		tp.AddHeader(
-			headers.columns,
+			upperCasedHeaders,
 			WithPadding(paddingFunc),
-			WithColor(cs.LightGrayUnderline),
+			WithColor(cs.TableHeader),
 		)
 	}
 

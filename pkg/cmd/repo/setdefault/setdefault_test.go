@@ -21,6 +21,7 @@ func TestNewCmdSetDefault(t *testing.T) {
 	tests := []struct {
 		name     string
 		gitStubs func(*run.CommandStubber)
+		remotes  func() (context.Remotes, error)
 		input    string
 		output   SetDefaultOptions
 		wantErr  bool
@@ -43,11 +44,13 @@ func TestNewCmdSetDefault(t *testing.T) {
 			output: SetDefaultOptions{Repo: ghrepo.New("cli", "cli")},
 		},
 		{
-			name:     "invalid repo argument",
-			gitStubs: func(cs *run.CommandStubber) {},
-			input:    "some_invalid_format",
-			wantErr:  true,
-			errMsg:   `expected the "[HOST/]OWNER/REPO" format, got "some_invalid_format"`,
+			name: "invalid repo argument",
+			gitStubs: func(cs *run.CommandStubber) {
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
+			},
+			input:   "some_invalid_format",
+			wantErr: true,
+			errMsg:  `given arg is not a valid repo or git remote: expected the "[HOST/]OWNER/REPO" format, got "some_invalid_format"`,
 		},
 		{
 			name: "view flag",
@@ -74,6 +77,38 @@ func TestNewCmdSetDefault(t *testing.T) {
 			wantErr: true,
 			errMsg:  "must be run from inside a git repository",
 		},
+		{
+			name: "remote name argument",
+			gitStubs: func(cs *run.CommandStubber) {
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
+			},
+			remotes: func() (context.Remotes, error) {
+				return context.Remotes{
+					{
+						Remote: &git.Remote{Name: "origin"},
+						Repo:   ghrepo.New("OWNER", "REPO"),
+					},
+				}, nil
+			},
+			input:  "origin",
+			output: SetDefaultOptions{Repo: ghrepo.New("OWNER", "REPO")},
+		},
+		{
+			name: "repo argument despite remote name matching owner/repo",
+			gitStubs: func(cs *run.CommandStubber) {
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
+			},
+			remotes: func() (context.Remotes, error) {
+				return context.Remotes{
+					{
+						Remote: &git.Remote{Name: "OWNER/REPO"},
+						Repo:   ghrepo.New("OTHER", "REPO"),
+					},
+				}, nil
+			},
+			input:  "OWNER/REPO",
+			output: SetDefaultOptions{Repo: ghrepo.New("OWNER", "REPO")},
+		},
 	}
 
 	for _, tt := range tests {
@@ -81,9 +116,17 @@ func TestNewCmdSetDefault(t *testing.T) {
 		io.SetStdoutTTY(true)
 		io.SetStdinTTY(true)
 		io.SetStderrTTY(true)
+		remotesFunc := tt.remotes
+		if remotesFunc == nil {
+			remotesFunc = func() (context.Remotes, error) {
+				return context.Remotes{}, nil
+			}
+		}
+
 		f := &cmdutil.Factory{
 			IOStreams: io,
 			GitClient: &git.Client{GitPath: "/fake/path/to/git"},
+			Remotes:   remotesFunc,
 		}
 
 		var gotOpts *SetDefaultOptions
@@ -135,6 +178,7 @@ func TestDefaultRun(t *testing.T) {
 		gitStubs      func(*run.CommandStubber)
 		prompterStubs func(*prompter.PrompterMock)
 		wantStdout    string
+		wantStderr    string
 		wantErr       bool
 		errMsg        string
 	}{
@@ -175,10 +219,11 @@ func TestDefaultRun(t *testing.T) {
 					Repo:   repo1,
 				},
 			},
-			wantStdout: "no default repository has been set; use `gh repo set-default` to select one\n",
+			wantStderr: "X No default remote repository has been set. To learn more about the default repository, run: gh repo set-default --help\n",
 		},
 		{
 			name: "view mode no current default",
+			tty:  false,
 			opts: SetDefaultOptions{ViewMode: true},
 			remotes: []*context.Remote{
 				{
@@ -186,6 +231,7 @@ func TestDefaultRun(t *testing.T) {
 					Repo:   repo1,
 				},
 			},
+			wantStderr: "X No default remote repository has been set. To learn more about the default repository, run: gh repo set-default --help\n",
 		},
 		{
 			name: "view mode with base resolved current default",
@@ -379,7 +425,7 @@ func TestDefaultRun(t *testing.T) {
 					}
 				}
 			},
-			wantStdout: "This command sets the default remote repository to use when querying the\nGitHub API for the locally cloned repository.\n\ngh uses the default repository for things like:\n\n - viewing and creating pull requests\n - viewing and creating issues\n - viewing and creating releases\n - working with GitHub Actions\n - adding repository and environment secrets\n\n✓ Set OWNER2/REPO2 as the default repository for the current directory\n",
+			wantStdout: "This command sets the default remote repository to use when querying the\nGitHub API for the locally cloned repository.\n\ngh uses the default repository for things like:\n\n - viewing and creating pull requests\n - viewing and creating issues\n - viewing and creating releases\n - working with GitHub Actions\n\n### NOTE: gh does not use the default repository for managing repository and environment secrets.\n\n✓ Set OWNER2/REPO2 as the default repository for the current directory\n",
 		},
 		{
 			name: "interactive mode only one known host",
@@ -453,7 +499,7 @@ func TestDefaultRun(t *testing.T) {
 					}
 				}
 			},
-			wantStdout: "This command sets the default remote repository to use when querying the\nGitHub API for the locally cloned repository.\n\ngh uses the default repository for things like:\n\n - viewing and creating pull requests\n - viewing and creating issues\n - viewing and creating releases\n - working with GitHub Actions\n - adding repository and environment secrets\n\n✓ Set OWNER2/REPO2 as the default repository for the current directory\n",
+			wantStdout: "This command sets the default remote repository to use when querying the\nGitHub API for the locally cloned repository.\n\ngh uses the default repository for things like:\n\n - viewing and creating pull requests\n - viewing and creating issues\n - viewing and creating releases\n - working with GitHub Actions\n\n### NOTE: gh does not use the default repository for managing repository and environment secrets.\n\n✓ Set OWNER2/REPO2 as the default repository for the current directory\n",
 		},
 	}
 
@@ -466,7 +512,7 @@ func TestDefaultRun(t *testing.T) {
 			return &http.Client{Transport: reg}, nil
 		}
 
-		io, _, stdout, _ := iostreams.Test()
+		io, _, stdout, stderr := iostreams.Test()
 		io.SetStdinTTY(tt.tty)
 		io.SetStdoutTTY(tt.tty)
 		io.SetStderrTTY(tt.tty)
@@ -498,7 +544,11 @@ func TestDefaultRun(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
-			assert.Equal(t, tt.wantStdout, stdout.String())
+			if tt.wantStdout != "" {
+				assert.Equal(t, tt.wantStdout, stdout.String())
+			} else {
+				assert.Equal(t, tt.wantStderr, stderr.String())
+			}
 		})
 	}
 }

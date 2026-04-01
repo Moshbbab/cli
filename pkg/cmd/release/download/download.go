@@ -57,16 +57,16 @@ func NewCmdDownload(f *cmdutil.Factory, runF func(*DownloadOptions) error) *cobr
 			is required.
 		`, "`"),
 		Example: heredoc.Doc(`
-			# download all assets from a specific release
+			# Download all assets from a specific release
 			$ gh release download v1.2.3
 
-			# download only Debian packages for the latest release
+			# Download only Debian packages for the latest release
 			$ gh release download --pattern '*.deb'
 
-			# specify multiple file patterns
+			# Specify multiple file patterns
 			$ gh release download -p '*.deb' -p '*.rpm'
 
-			# download the archive of the source code for a release
+			# Download the archive of the source code for a release
 			$ gh release download v1.2.3 --archive=zip
 		`),
 		Args: cobra.MaximumNArgs(1),
@@ -165,10 +165,24 @@ func downloadRun(opts *DownloadOptions) error {
 	var toDownload []shared.ReleaseAsset
 	isArchive := false
 	if opts.ArchiveType != "" {
-		var archiveURL = release.ZipballURL
+		var archiveURL string
 		if opts.ArchiveType == "tar.gz" {
 			archiveURL = release.TarballURL
+		} else {
+			archiveURL = release.ZipballURL
 		}
+
+		if archiveURL == "" {
+			errMessage := fmt.Sprintf(
+				"release %q with tag %q, does not have a %q archive asset.",
+				release.Name, release.TagName, opts.ArchiveType,
+			)
+			if release.IsDraft {
+				errMessage += " Most likely, this is because it is a draft."
+			}
+			return errors.New(errMessage)
+		}
+
 		// create pseudo-Asset with no name and pointing to ZipBallURL or TarBallURL
 		toDownload = append(toDownload, shared.ReleaseAsset{APIURL: archiveURL})
 		isArchive = true

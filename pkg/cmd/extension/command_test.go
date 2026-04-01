@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/internal/browser"
 	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -21,13 +23,14 @@ import (
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewCmdExtension(t *testing.T) {
 	tempDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	assert.NoError(t, os.Chdir(tempDir))
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	localExtensionTempDir := filepath.Join(tempDir, "gh-hello")
+	require.NoError(t, os.MkdirAll(localExtensionTempDir, 0755))
+	t.Chdir(localExtensionTempDir)
 
 	tests := []struct {
 		name          string
@@ -269,15 +272,56 @@ func TestNewCmdExtension(t *testing.T) {
 			name: "install local extension",
 			args: []string{"install", "."},
 			managerStubs: func(em *extensions.ExtensionManagerMock) func(*testing.T) {
+				em.ListFunc = func() []extensions.Extension {
+					return []extensions.Extension{}
+				}
 				em.InstallLocalFunc = func(dir string) error {
 					return nil
 				}
 				return func(t *testing.T) {
 					calls := em.InstallLocalCalls()
 					assert.Equal(t, 1, len(calls))
-					assert.Equal(t, tempDir, normalizeDir(calls[0].Dir))
+					assert.Equal(t, localExtensionTempDir, normalizeDir(calls[0].Dir))
 				}
 			},
+		},
+		{
+			name: "installing local extension without executable with TTY shows warning",
+			args: []string{"install", "."},
+			managerStubs: func(em *extensions.ExtensionManagerMock) func(*testing.T) {
+				em.InstallLocalFunc = func(dir string) error {
+					return &ErrExtensionExecutableNotFound{
+						Dir:  tempDir,
+						Name: "gh-test",
+					}
+				}
+				em.ListFunc = func() []extensions.Extension {
+					return []extensions.Extension{}
+				}
+				return nil
+			},
+			wantStderr: fmt.Sprintf("! an extension has been installed but there is no executable: executable file named \"%s\" in %s is required to run the extension after install. Perhaps you need to build it?\n", "gh-test", tempDir),
+			wantErr:    false,
+			isTTY:      true,
+		},
+		{
+			name: "install local extension without executable with no TTY shows no warning",
+			args: []string{"install", "."},
+			managerStubs: func(em *extensions.ExtensionManagerMock) func(*testing.T) {
+				em.InstallLocalFunc = func(dir string) error {
+					return &ErrExtensionExecutableNotFound{
+						Dir:  tempDir,
+						Name: "gh-test",
+					}
+				}
+				em.ListFunc = func() []extensions.Extension {
+					return []extensions.Extension{}
+				}
+				return nil
+			},
+			wantStderr: "",
+			wantErr:    false,
+			isTTY:      false,
 		},
 		{
 			name: "error extension not found",
@@ -331,7 +375,7 @@ func TestNewCmdExtension(t *testing.T) {
 				}
 			},
 			isTTY:      true,
-			wantStdout: "✓ Successfully upgraded extension\n",
+			wantStdout: "✓ Successfully checked extension upgrades\n",
 		},
 		{
 			name: "upgrade an extension dry run",
@@ -351,7 +395,7 @@ func TestNewCmdExtension(t *testing.T) {
 				}
 			},
 			isTTY:      true,
-			wantStdout: "✓ Would have upgraded extension\n",
+			wantStdout: "✓ Successfully checked extension upgrades\n",
 		},
 		{
 			name: "upgrade an extension notty",
@@ -384,7 +428,7 @@ func TestNewCmdExtension(t *testing.T) {
 				}
 			},
 			isTTY:      true,
-			wantStdout: "✓ Successfully upgraded extension\n",
+			wantStdout: "✓ Successfully checked extension upgrades\n",
 		},
 		{
 			name: "upgrade extension error",
@@ -419,7 +463,7 @@ func TestNewCmdExtension(t *testing.T) {
 				}
 			},
 			isTTY:      true,
-			wantStdout: "✓ Successfully upgraded extension\n",
+			wantStdout: "✓ Successfully checked extension upgrades\n",
 		},
 		{
 			name: "upgrade an extension full name",
@@ -435,7 +479,7 @@ func TestNewCmdExtension(t *testing.T) {
 				}
 			},
 			isTTY:      true,
-			wantStdout: "✓ Successfully upgraded extension\n",
+			wantStdout: "✓ Successfully checked extension upgrades\n",
 		},
 		{
 			name: "upgrade all",
@@ -451,7 +495,7 @@ func TestNewCmdExtension(t *testing.T) {
 				}
 			},
 			isTTY:      true,
-			wantStdout: "✓ Successfully upgraded extensions\n",
+			wantStdout: "✓ Successfully checked extension upgrades\n",
 		},
 		{
 			name: "upgrade all dry run",
@@ -471,7 +515,7 @@ func TestNewCmdExtension(t *testing.T) {
 				}
 			},
 			isTTY:      true,
-			wantStdout: "✓ Would have upgraded extensions\n",
+			wantStdout: "✓ Successfully checked extension upgrades\n",
 		},
 		{
 			name: "upgrade all none installed",
@@ -852,7 +896,7 @@ func TestNewCmdExtension(t *testing.T) {
 				}
 			},
 			isTTY:      true,
-			wantStdout: "✓ Successfully upgraded extension\n",
+			wantStdout: "✓ Successfully checked extension upgrades\n",
 		},
 	}
 
@@ -888,7 +932,7 @@ func TestNewCmdExtension(t *testing.T) {
 			}
 
 			f := cmdutil.Factory{
-				Config: func() (config.Config, error) {
+				Config: func() (gh.Config, error) {
 					return config.NewBlankConfig(), nil
 				},
 				IOStreams:        ios,
@@ -978,7 +1022,7 @@ func Test_checkValidExtension(t *testing.T) {
 				extOwner: "monalisa",
 				extName:  "gherkins",
 			},
-			wantError: "extension repository name must start with `gh-`",
+			wantError: "extension name must start with `gh-`",
 		},
 		{
 			name: "clashes with built-in command",
@@ -1014,6 +1058,86 @@ func Test_checkValidExtension(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := checkValidExtension(tt.args.rootCmd, tt.args.manager, tt.args.extName, tt.args.extOwner)
+			if tt.wantError == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.EqualError(t, err, tt.wantError)
+			}
+		})
+	}
+}
+
+func Test_checkValidExtensionWithLocalExtension(t *testing.T) {
+	fakeRootCmd := &cobra.Command{}
+	fakeRootCmd.AddCommand(&cobra.Command{Use: "help"})
+	fakeRootCmd.AddCommand(&cobra.Command{Use: "auth"})
+
+	m := &extensions.ExtensionManagerMock{
+		ListFunc: func() []extensions.Extension {
+			return []extensions.Extension{
+				&extensions.ExtensionMock{
+					OwnerFunc: func() string { return "monalisa" },
+					NameFunc:  func() string { return "screensaver" },
+					PathFunc:  func() string { return "some/install/dir/gh-screensaver" },
+				},
+				&extensions.ExtensionMock{
+					OwnerFunc: func() string { return "monalisa" },
+					NameFunc:  func() string { return "triage" },
+					PathFunc:  func() string { return "some/install/dir/gh-triage" },
+				},
+			}
+		},
+	}
+
+	type args struct {
+		rootCmd *cobra.Command
+		manager extensions.ExtensionManager
+		dir     string
+	}
+	tests := []struct {
+		name      string
+		args      args
+		wantError string
+	}{
+		{
+			name: "valid extension",
+			args: args{
+				rootCmd: fakeRootCmd,
+				manager: m,
+				dir:     "some/install/dir/gh-hello",
+			},
+		},
+		{
+			name: "invalid extension name",
+			args: args{
+				rootCmd: fakeRootCmd,
+				manager: m,
+				dir:     "some/install/dir/hello",
+			},
+			wantError: "extension name must start with `gh-`",
+		},
+		{
+			name: "clashes with built-in command",
+			args: args{
+				rootCmd: fakeRootCmd,
+				manager: m,
+				dir:     "some/install/dir/gh-auth",
+			},
+			wantError: "\"auth\" matches the name of a built-in command or alias",
+		},
+		{
+			name: "clashes with an installed extension",
+			args: args{
+				rootCmd: fakeRootCmd,
+				manager: m,
+				dir:     "some/different/install/dir/gh-triage",
+			},
+			wantError: "there is already an installed extension that provides the \"triage\" command",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := checkValidExtension(tt.args.rootCmd, tt.args.manager, filepath.Base(tt.args.dir), "")
 			if tt.wantError == "" {
 				assert.NoError(t, err)
 			} else {

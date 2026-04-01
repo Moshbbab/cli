@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/httpmock"
@@ -176,7 +177,7 @@ func Test_deleteRun(t *testing.T) {
 			opts: DeleteOptions{KeyID: "ABC123", Confirmed: true},
 			httpStubs: func(reg *httpmock.Registry) {
 				reg.Register(httpmock.REST("GET", "user/gpg_keys"), httpmock.StatusStringResponse(200, keysResp))
-				reg.Register(httpmock.REST("DELETE", "user/gpg_keys/123"), httpmock.StatusJSONResponse(404, api.HTTPError{
+				reg.Register(httpmock.REST("DELETE", "user/gpg_keys/123"), httpmock.JSONErrorResponse(404, api.HTTPError{
 					StatusCode: 404,
 					Message:    "GPG key 123 not found",
 				}))
@@ -201,7 +202,7 @@ func Test_deleteRun(t *testing.T) {
 		tt.opts.HttpClient = func() (*http.Client, error) {
 			return &http.Client{Transport: reg}, nil
 		}
-		tt.opts.Config = func() (config.Config, error) {
+		tt.opts.Config = func() (gh.Config, error) {
 			return config.NewBlankConfig(), nil
 		}
 		ios, _, stdout, _ := iostreams.Test()

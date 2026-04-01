@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/httpmock"
@@ -33,14 +34,40 @@ func Test_NewCmdRefresh(t *testing.T) {
 			},
 		},
 		{
+			name: "tty clipboard",
+			tty:  true,
+			cli:  "-c",
+			wants: RefreshOptions{
+				Hostname:  "",
+				Clipboard: true,
+			},
+		},
+		{
 			name:     "nontty no arguments",
 			wantsErr: true,
+		},
+		{
+			name: "nontty hostname and clipboard",
+			cli:  "-h aline.cedrac -c",
+			wants: RefreshOptions{
+				Hostname:  "aline.cedrac",
+				Clipboard: true,
+			},
 		},
 		{
 			name: "nontty hostname",
 			cli:  "-h aline.cedrac",
 			wants: RefreshOptions{
 				Hostname: "aline.cedrac",
+			},
+		},
+		{
+			name: "tty hostname and clipboard",
+			tty:  true,
+			cli:  "-h aline.cedrac -c",
+			wants: RefreshOptions{
+				Hostname:  "aline.cedrac",
+				Clipboard: true,
 			},
 		},
 		{
@@ -165,6 +192,7 @@ func Test_NewCmdRefresh(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tt.wants.Hostname, gotOpts.Hostname)
 			require.Equal(t, tt.wants.Scopes, gotOpts.Scopes)
+			require.Equal(t, tt.wants.Clipboard, gotOpts.Clipboard)
 		})
 	}
 }
@@ -173,6 +201,7 @@ type authArgs struct {
 	hostname      string
 	scopes        []string
 	interactive   bool
+	clipboard     bool
 	secureStorage bool
 }
 
@@ -223,6 +252,22 @@ func Test_refreshRun(t *testing.T) {
 				hostname:      "obed.morton",
 				scopes:        []string{},
 				secureStorage: true,
+			},
+		},
+		{
+			name: "no hostname, one host configured, clipboard enabled",
+			cfgHosts: []string{
+				"github.com",
+			},
+			opts: &RefreshOptions{
+				Hostname:  "",
+				Clipboard: true,
+			},
+			wantAuthArgs: authArgs{
+				hostname:      "github.com",
+				scopes:        []string{},
+				secureStorage: true,
+				clipboard:     true,
 			},
 		},
 		{
@@ -426,10 +471,11 @@ func Test_refreshRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			aa := authArgs{}
-			tt.opts.AuthFlow = func(_ *iostreams.IOStreams, hostname string, scopes []string, interactive bool) (token, username, error) {
+			tt.opts.AuthFlow = func(_ *http.Client, _ *iostreams.IOStreams, hostname string, scopes []string, interactive bool, clipboard bool) (token, username, error) {
 				aa.hostname = hostname
 				aa.scopes = scopes
 				aa.interactive = interactive
+				aa.clipboard = clipboard
 				if tt.authOut != (authOut{}) {
 					return token(tt.authOut.token), username(tt.authOut.username), tt.authOut.err
 				}
@@ -441,7 +487,7 @@ func Test_refreshRun(t *testing.T) {
 				_, err := cfg.Authentication().Login(hostname, "test-user", "abc123", "https", false)
 				require.NoError(t, err)
 			}
-			tt.opts.Config = func() (config.Config, error) {
+			tt.opts.Config = func() (gh.Config, error) {
 				return cfg, nil
 			}
 
@@ -468,7 +514,9 @@ func Test_refreshRun(t *testing.T) {
 					}, nil
 				},
 			)
-			tt.opts.HttpClient = &http.Client{Transport: httpReg}
+			tt.opts.PlainHttpClient = func() (*http.Client, error) {
+				return &http.Client{Transport: httpReg}, nil
+			}
 
 			pm := &prompter.PrompterMock{}
 			if tt.prompterStubs != nil {
@@ -487,6 +535,7 @@ func Test_refreshRun(t *testing.T) {
 			require.Equal(t, tt.wantAuthArgs.hostname, aa.hostname)
 			require.Equal(t, tt.wantAuthArgs.scopes, aa.scopes)
 			require.Equal(t, tt.wantAuthArgs.interactive, aa.interactive)
+			require.Equal(t, tt.wantAuthArgs.clipboard, aa.clipboard)
 
 			authCfg := cfg.Authentication()
 			activeUser, _ := authCfg.ActiveUser(aa.hostname)

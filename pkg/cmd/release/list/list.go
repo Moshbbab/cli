@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cli/cli/v2/api"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/tableprinter"
 	"github.com/cli/cli/v2/internal/text"
@@ -19,6 +21,7 @@ type ListOptions struct {
 	BaseRepo   func() (ghrepo.Interface, error)
 
 	Exporter cmdutil.Exporter
+	Detector fd.Detector
 
 	LimitResults       int
 	ExcludeDrafts      bool
@@ -68,7 +71,20 @@ func listRun(opts *ListOptions) error {
 		return err
 	}
 
-	releases, err := fetchReleases(httpClient, baseRepo, opts.LimitResults, opts.ExcludeDrafts, opts.ExcludePreReleases, opts.Order)
+	// TODO: immutableReleaseFullSupport
+	// The detector is not needed when covered GHES versions fully support
+	// immutable releases (probably when 3.18 goes EOL).
+	if opts.Detector == nil {
+		cachedClient := api.NewCachedHTTPClient(httpClient, time.Hour*24)
+		opts.Detector = fd.NewDetector(cachedClient, baseRepo.RepoHost())
+	}
+
+	releaseFeatures, err := opts.Detector.ReleaseFeatures()
+	if err != nil {
+		return err
+	}
+
+	releases, err := fetchReleases(httpClient, baseRepo, opts.LimitResults, opts.ExcludeDrafts, opts.ExcludePreReleases, opts.Order, releaseFeatures)
 	if err != nil {
 		return err
 	}
@@ -88,7 +104,7 @@ func listRun(opts *ListOptions) error {
 	}
 
 	table := tableprinter.New(opts.IO, tableprinter.WithHeader("Title", "Type", "Tag name", "Published"))
-	iofmt := opts.IO.ColorScheme()
+	cs := opts.IO.ColorScheme()
 	for _, rel := range releases {
 		title := text.RemoveExcessiveWhitespace(rel.Name)
 		if title == "" {
@@ -100,13 +116,13 @@ func listRun(opts *ListOptions) error {
 		var badgeColor func(string) string
 		if rel.IsLatest {
 			badge = "Latest"
-			badgeColor = iofmt.Green
+			badgeColor = cs.Green
 		} else if rel.IsDraft {
 			badge = "Draft"
-			badgeColor = iofmt.Red
+			badgeColor = cs.Red
 		} else if rel.IsPrerelease {
 			badge = "Pre-release"
-			badgeColor = iofmt.Yellow
+			badgeColor = cs.Yellow
 		}
 		table.AddField(badge, tableprinter.WithColor(badgeColor))
 
@@ -116,7 +132,7 @@ func listRun(opts *ListOptions) error {
 		if rel.PublishedAt.IsZero() {
 			pubDate = rel.CreatedAt
 		}
-		table.AddTimeField(time.Now(), pubDate, iofmt.Gray)
+		table.AddTimeField(time.Now(), pubDate, cs.Muted)
 		table.EndRow()
 	}
 	err = table.Render()

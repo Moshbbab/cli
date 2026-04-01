@@ -28,7 +28,9 @@ func NewCmdPrs(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *cobr
 	cmd := &cobra.Command{
 		Use:   "prs [<query>]",
 		Short: "Search for pull requests",
-		Long: heredoc.Doc(`
+		// TODO advancedIssueSearchCleanup
+		// Update the links and remove the mention at GHES 3.17 version.
+		Long: heredoc.Docf(`
 			Search for pull requests on GitHub.
 
 			The command supports constructing queries using the GitHub search syntax,
@@ -36,29 +38,35 @@ func NewCmdPrs(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *cobr
 
 			GitHub search syntax is documented at:
 			<https://docs.github.com/search-github/searching-on-github/searching-issues-and-pull-requests>
-    `),
+
+			On supported GitHub hosts, advanced issue search syntax can be used in the
+			%[1]s--search%[1]s query. For more information about advanced issue search, see:
+			<https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/filtering-and-searching-issues-and-pull-requests#building-advanced-filters-for-issues>
+
+			For more information on handling search queries containing a hyphen, run %[1]sgh search --help%[1]s.
+		`, "`"),
 		Example: heredoc.Doc(`
-			# search pull requests matching set of keywords "fix" and "bug"
+			# Search pull requests matching set of keywords "fix" and "bug"
 			$ gh search prs fix bug
 
-			# search draft pull requests in cli repository
+			# Search draft pull requests in cli repository
 			$ gh search prs --repo=cli/cli --draft
 
-			# search open pull requests requesting your review
+			# Search open pull requests requesting your review
 			$ gh search prs --review-requested=@me --state=open
 
-			# search merged pull requests assigned to yourself
+			# Search merged pull requests assigned to yourself
 			$ gh search prs --assignee=@me --merged
 
-			# search pull requests with numerous reactions
+			# Search pull requests with numerous reactions
 			$ gh search prs --reactions=">100"
 
-			# search pull requests without label "bug"
+			# Search pull requests without label "bug"
 			$ gh search prs -- -label:bug
 
-			# search pull requests only from un-archived repositories (default is all repositories)
+			# Search pull requests only from un-archived repositories (default is all repositories)
 			$ gh search prs --owner github --archived=false
-    `),
+		`),
 		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 && c.Flags().NFlag() == 0 {
 				return cmdutil.FlagErrorf("specify search keywords or flags")
@@ -168,7 +176,7 @@ func NewCmdPrs(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *cobr
 	cmd.Flags().BoolVar(&noLabel, "no-label", false, "Filter on missing label")
 	cmd.Flags().BoolVar(&noMilestone, "no-milestone", false, "Filter on missing milestone")
 	cmd.Flags().BoolVar(&noProject, "no-project", false, "Filter on missing project")
-	cmd.Flags().StringVar(&opts.Query.Qualifiers.Project, "project", "", "Filter on project board `number`")
+	cmd.Flags().StringVar(&opts.Query.Qualifiers.Project, "project", "", "Filter on project board `owner/number`")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Reactions, "reactions", "", "Filter on `number` of reactions")
 	cmd.Flags().StringSliceVarP(&opts.Query.Qualifiers.Repo, "repo", "R", nil, "Filter on repository")
 	cmdutil.StringEnumFlag(cmd, &opts.Query.Qualifiers.State, "state", "", "", []string{"open", "closed"}, "Filter based on state")

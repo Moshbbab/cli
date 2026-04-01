@@ -38,12 +38,35 @@ type Issue struct {
 	Comments         Comments
 	Author           Author
 	Assignees        Assignees
+	AssignedActors   AssignedActors
 	Labels           Labels
 	ProjectCards     ProjectCards
 	ProjectItems     ProjectItems
 	Milestone        *Milestone
 	ReactionGroups   ReactionGroups
 	IsPinned         bool
+
+	ClosedByPullRequestsReferences ClosedByPullRequestsReferences
+}
+
+type ClosedByPullRequestsReferences struct {
+	Nodes []struct {
+		ID         string
+		Number     int
+		URL        string
+		Repository struct {
+			ID    string
+			Name  string
+			Owner struct {
+				ID    string
+				Login string
+			}
+		}
+	}
+	PageInfo struct {
+		HasNextPage bool
+		EndCursor   string
+	}
 }
 
 // return values for Issue.Typename
@@ -69,6 +92,61 @@ func (a Assignees) Logins() []string {
 	return logins
 }
 
+type AssignedActors struct {
+	Nodes      []Actor
+	TotalCount int
+}
+
+func (a AssignedActors) Logins() []string {
+	logins := make([]string, len(a.Nodes))
+	for i, a := range a.Nodes {
+		logins[i] = a.Login
+	}
+	return logins
+}
+
+// DisplayNames returns a list of display names for the assigned actors.
+func (a AssignedActors) DisplayNames() []string {
+	// These display names are used for populating the "default" assigned actors
+	// from the AssignedActors type. But, this is only one piece of the puzzle
+	// as later, other queries will fetch the full list of possible assignable
+	// actors from the repository, and the two lists will be reconciled.
+	//
+	// It's important that the display names are the same between the defaults
+	// (the values returned here) and the full list (the values returned by
+	// other repository queries). Any discrepancy would result in an
+	// "invalid default", which means an assigned actor will not be matched
+	// to an assignable actor and not presented as a "default" selection.
+	// Not being presented as a default would cause the actor to be potentially
+	// unassigned if the edits were submitted.
+	//
+	// To prevent this, we need shared logic to look up an actor's display name.
+	// However, our API types between assignedActors and the full list of
+	// assignableActors are different. So, as an attempt to maintain
+	// consistency we convert the assignedActors to the same types as the
+	// repository's assignableActors, treating the assignableActors DisplayName
+	// methods as the sources of truth.
+	// TODO KW: make this comment less of a wall of text if needed.
+	var displayNames []string
+	for _, a := range a.Nodes {
+		if a.TypeName == "User" {
+			u := NewAssignableUser(
+				a.ID,
+				a.Login,
+				a.Name,
+			)
+			displayNames = append(displayNames, u.DisplayName())
+		} else if a.TypeName == "Bot" {
+			b := NewAssignableBot(
+				a.ID,
+				a.Login,
+			)
+			displayNames = append(displayNames, b.DisplayName())
+		}
+	}
+	return displayNames
+}
+
 type Labels struct {
 	Nodes      []IssueLabel
 	TotalCount int
@@ -88,7 +166,8 @@ type ProjectCards struct {
 }
 
 type ProjectItems struct {
-	Nodes []*ProjectV2Item
+	Nodes      []*ProjectV2Item
+	TotalCount int
 }
 
 type ProjectInfo struct {
@@ -155,6 +234,11 @@ type Author struct {
 	Login string
 }
 
+// DisplayName returns a user-friendly name via actorDisplayName.
+func (a Author) DisplayName() string {
+	return actorDisplayName("", a.Login, a.Name)
+}
+
 func (author Author) MarshalJSON() ([]byte, error) {
 	if author.ID == "" {
 		return json.Marshal(map[string]interface{}{
@@ -181,6 +265,11 @@ type CommentAuthor struct {
 	//	} `graphql:"... on User"`
 }
 
+// DisplayName returns a user-friendly name via actorDisplayName.
+func (a CommentAuthor) DisplayName() string {
+	return actorDisplayName("", a.Login, "")
+}
+
 // IssueCreate creates an issue in a GitHub repository
 func IssueCreate(client *Client, repo *Repository, params map[string]interface{}) (*Issue, error) {
 	query := `
@@ -200,7 +289,8 @@ func IssueCreate(client *Client, repo *Repository, params map[string]interface{}
 		switch key {
 		case "assigneeIds", "body", "issueTemplate", "labelIds", "milestoneId", "projectIds", "repositoryId", "title":
 			inputParams[key] = val
-		case "projectV2Ids":
+		case "projectV2Ids", "assigneeLogins":
+			// handled after issue creation
 		default:
 			return nil, fmt.Errorf("invalid IssueCreate mutation parameter %s", key)
 		}
@@ -220,6 +310,14 @@ func IssueCreate(client *Client, repo *Repository, params map[string]interface{}
 		return nil, err
 	}
 	issue := &result.CreateIssue.Issue
+
+	// Assign users using login-based mutation when ApiActorsSupported is true (github.com).
+	if assigneeLogins, ok := params["assigneeLogins"].([]string); ok && len(assigneeLogins) > 0 {
+		err := ReplaceActorsForAssignableByLogin(client, repo, issue.ID, assigneeLogins)
+		if err != nil {
+			return issue, err
+		}
+	}
 
 	// projectV2 parameters aren't supported in the `createIssue` mutation,
 	// so add them after the issue has been created.
@@ -286,7 +384,7 @@ func IssueStatus(client *Client, repo ghrepo.Interface, options IssueStatusOptio
 				}
 			}
 		}
-    }`
+	}`
 
 	variables := map[string]interface{}{
 		"owner":  repo.RepoOwner(),

@@ -12,6 +12,15 @@
 /.goreleaser.generated.yml
 /script/build
 /script/build.exe
+/pkg_payload
+/build/macOS/resources
+
+# Windows resource files
+/cmd/gh/*.syso
+
+# Third-party licenses
+/internal/licenses/embed/*/*
+!/internal/licenses/embed/*/PLACEHOLDER
 
 # VS Code
 .vscode
@@ -24,5 +33,8 @@
 
 # vim
 *.swp
+
+# Emacs
+*~
 
 vendor/

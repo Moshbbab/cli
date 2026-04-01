@@ -2,6 +2,7 @@ package set
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,12 +11,11 @@ import (
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/pkg/cmd/variable/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
-	"github.com/hashicorp/go-multierror"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
@@ -27,7 +27,7 @@ type iprompter interface {
 type SetOptions struct {
 	HttpClient func() (*http.Client, error)
 	IO         *iostreams.IOStreams
-	Config     func() (config.Config, error)
+	Config     func() (gh.Config, error)
 	BaseRepo   func() (ghrepo.Interface, error)
 	Prompter   iprompter
 
@@ -201,12 +201,12 @@ func setRun(opts *SetOptions) error {
 		}()
 	}
 
-	err = nil
+	var errs []error
 	cs := opts.IO.ColorScheme()
 	for i := 0; i < len(variables); i++ {
 		result := <-setc
 		if result.Err != nil {
-			err = multierror.Append(err, result.Err)
+			errs = append(errs, result.Err)
 			continue
 		}
 		if !opts.IO.IsStdoutTTY() {
@@ -222,7 +222,7 @@ func setRun(opts *SetOptions) error {
 		fmt.Fprintf(opts.IO.Out, "%s %s variable %s for %s\n", cs.SuccessIcon(), result.Operation, result.Key, target)
 	}
 
-	return err
+	return errors.Join(errs...)
 }
 
 func getVariablesFromOptions(opts *SetOptions) (map[string]string, error) {

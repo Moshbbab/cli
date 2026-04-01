@@ -14,10 +14,34 @@ import (
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/httpmock"
 	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/jsonfieldstest"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestJSONFields(t *testing.T) {
+	jsonfieldstest.ExpectCommandToSupportJSONFields(t, NewCmdView, []string{
+		"apiUrl",
+		"author",
+		"assets",
+		"body",
+		"createdAt",
+		"databaseId",
+		"id",
+		"isDraft",
+		"isPrerelease",
+		"isImmutable",
+		"name",
+		"publishedAt",
+		"tagName",
+		"tarballUrl",
+		"targetCommitish",
+		"uploadUrl",
+		"url",
+		"zipballUrl",
+	})
+}
 
 func Test_NewCmdView(t *testing.T) {
 	tests := []struct {
@@ -127,8 +151,9 @@ func Test_viewRun(t *testing.T) {
 				
 				
 				Assets
-				windows.zip  12 B
-				linux.tgz    34 B
+				NAME         DIGEST           SIZE
+				windows.zip  sha256:deadc0de  12 B
+				linux.tgz                     34 B
 				
 				View on GitHub: https://github.com/OWNER/REPO/releases/tags/v1.2.3
 			`),
@@ -145,15 +170,16 @@ func Test_viewRun(t *testing.T) {
 			wantStdout: heredoc.Doc(`
 				v1.2.3
 				MonaLisa released this about 1 day ago
-				
+
 				                                                                              
 				  • Fixed bugs                                                                
-				
-				
+
+
 				Assets
-				windows.zip  12 B
-				linux.tgz    34 B
-				
+				NAME         DIGEST           SIZE
+				windows.zip  sha256:deadc0de  12 B
+				linux.tgz                     34 B
+
 				View on GitHub: https://github.com/OWNER/REPO/releases/tags/v1.2.3
 			`),
 			wantStderr: ``,
@@ -171,6 +197,7 @@ func Test_viewRun(t *testing.T) {
 				tag:	v1.2.3
 				draft:	false
 				prerelease:	false
+				immutable:	true
 				author:	MonaLisa
 				created:	2020-08-31T15:44:24+02:00
 				published:	2020-08-31T15:44:24+02:00
@@ -195,6 +222,7 @@ func Test_viewRun(t *testing.T) {
 				tag:	v1.2.3
 				draft:	false
 				prerelease:	false
+				immutable:	true
 				author:	MonaLisa
 				created:	2020-08-31T15:44:24+02:00
 				published:	2020-08-31T15:44:24+02:00
@@ -219,14 +247,15 @@ func Test_viewRun(t *testing.T) {
 			shared.StubFetchRelease(t, fakeHTTP, "OWNER", "REPO", tt.opts.TagName, fmt.Sprintf(`{
 				"tag_name": "v1.2.3",
 				"draft": false,
+				"immutable": true,
 				"author": { "login": "MonaLisa" },
 				"body": "%[2]s",
 				"created_at": "%[1]s",
 				"published_at": "%[1]s",
 				"html_url": "https://github.com/OWNER/REPO/releases/tags/v1.2.3",
 				"assets": [
-					{ "name": "windows.zip", "size": 12 },
-					{ "name": "linux.tgz", "size": 34 }
+					{ "name": "windows.zip", "size": 12, "digest": "sha256:deadc0de" },
+					{ "name": "linux.tgz", "size": 34, "digest": null }
 				]
 			}`, tt.releasedAt.Format(time.RFC3339), tt.releaseBody))
 

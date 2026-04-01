@@ -119,6 +119,93 @@ func TestAddJSONFlags(t *testing.T) {
 	}
 }
 
+func TestAddJSONFlagsWithoutShorthand(t *testing.T) {
+	tests := []struct {
+		name      string
+		setFlags  func(cmd *cobra.Command)
+		wantFlags map[string]string
+	}{
+		{
+			name: "no conflicting flags",
+			setFlags: func(cmd *cobra.Command) {
+				cmd.Flags().StringP("web", "w", "", "")
+				cmd.Flags().StringP("token", "t", "", "")
+			},
+			wantFlags: map[string]string{
+				"web":      "w",
+				"token":    "t",
+				"jq":       "",
+				"template": "",
+				"json":     "",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			cmd := &cobra.Command{Run: func(*cobra.Command, []string) {}}
+			tt.setFlags(cmd)
+
+			AddJSONFlagsWithoutShorthand(cmd, nil, []string{})
+
+			for f, shorthand := range tt.wantFlags {
+				flag := cmd.Flags().Lookup(f)
+				require.NotNil(t, flag)
+				require.Equal(t, shorthand, flag.Shorthand)
+			}
+		})
+	}
+}
+
+// TestAddJSONFlagsSetsAnnotations asserts that `AddJSONFlags` function adds the
+// appropriate annotation to the command, which could later be used by doc
+// generator functions.
+func TestAddJSONFlagsSetsAnnotations(t *testing.T) {
+	tests := []struct {
+		name                string
+		cmd                 *cobra.Command
+		jsonFields          []string
+		expectedAnnotations map[string]string
+	}{
+		{
+			name:                "empty set of fields",
+			cmd:                 &cobra.Command{},
+			jsonFields:          []string{},
+			expectedAnnotations: nil,
+		},
+		{
+			name:                "empty set of fields, with existing annotations",
+			cmd:                 &cobra.Command{Annotations: map[string]string{"foo": "bar"}},
+			jsonFields:          []string{},
+			expectedAnnotations: map[string]string{"foo": "bar"},
+		},
+		{
+			name:       "no other annotations",
+			cmd:        &cobra.Command{},
+			jsonFields: []string{"few", "json", "fields"},
+			expectedAnnotations: map[string]string{
+				"help:json-fields": "few,json,fields",
+			},
+		},
+		{
+			name:       "with existing annotations (ensure no overwrite)",
+			cmd:        &cobra.Command{Annotations: map[string]string{"foo": "bar"}},
+			jsonFields: []string{"few", "json", "fields"},
+			expectedAnnotations: map[string]string{
+				"foo":              "bar",
+				"help:json-fields": "few,json,fields",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			AddJSONFlags(tt.cmd, nil, tt.jsonFields)
+			assert.Equal(t, tt.expectedAnnotations, tt.cmd.Annotations)
+		})
+	}
+}
+
 func TestAddFormatFlags(t *testing.T) {
 	tests := []struct {
 		name        string

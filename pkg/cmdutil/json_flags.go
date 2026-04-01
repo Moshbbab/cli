@@ -25,9 +25,33 @@ type JSONFlagError struct {
 
 func AddJSONFlags(cmd *cobra.Command, exportTarget *Exporter, fields []string) {
 	f := cmd.Flags()
+	addJsonFlag(f)
+	addJqFlag(f, "q")
+	addTemplateFlag(f, "t")
+
+	setupJsonFlags(cmd, exportTarget, fields)
+}
+
+func AddJSONFlagsWithoutShorthand(cmd *cobra.Command, exportTarget *Exporter, fields []string) {
+	f := cmd.Flags()
+	addJsonFlag(f)
+	addJqFlag(f, "")
+	addTemplateFlag(f, "")
+
+	setupJsonFlags(cmd, exportTarget, fields)
+}
+
+func addJsonFlag(f *pflag.FlagSet) {
 	f.StringSlice("json", nil, "Output JSON with the specified `fields`")
-	f.StringP("jq", "q", "", "Filter JSON output using a jq `expression`")
-	f.StringP("template", "t", "", "Format JSON output using a Go template; see \"gh help formatting\"")
+}
+func addJqFlag(f *pflag.FlagSet, shorthand string) {
+	f.StringP("jq", shorthand, "", "Filter JSON output using a jq `expression`")
+}
+func addTemplateFlag(f *pflag.FlagSet, shorthand string) {
+	f.StringP("template", shorthand, "", "Format JSON output using a Go template; see \"gh help formatting\"")
+}
+
+func setupJsonFlags(cmd *cobra.Command, exportTarget *Exporter, fields []string) {
 
 	_ = cmd.RegisterFlagCompletionFunc("json", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		var results []string
@@ -83,6 +107,15 @@ func AddJSONFlags(cmd *cobra.Command, exportTarget *Exporter, fields []string) {
 		}
 		return e
 	})
+
+	if len(fields) == 0 {
+		return
+	}
+
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations["help:json-fields"] = strings.Join(fields, ",")
 }
 
 func checkJSONFlags(cmd *cobra.Command) (*jsonExporter, error) {
@@ -245,7 +278,7 @@ func (e *jsonExporter) exportData(v reflect.Value) interface{} {
 		}
 		return m.Interface()
 	case reflect.Struct:
-		if v.CanAddr() && reflect.PtrTo(v.Type()).Implements(exportableType) {
+		if v.CanAddr() && reflect.PointerTo(v.Type()).Implements(exportableType) {
 			ve := v.Addr().Interface().(exportable)
 			return ve.ExportData(e.fields)
 		} else if v.Type().Implements(exportableType) {

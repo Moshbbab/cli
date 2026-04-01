@@ -13,6 +13,7 @@ import (
 	"github.com/cli/cli/v2/context"
 	"github.com/cli/cli/v2/git"
 	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/internal/run"
@@ -143,6 +144,12 @@ func TestNewCmdFork(t *testing.T) {
 				Rename:     false,
 			},
 		},
+		{
+			name:    "remote with repo argument",
+			cli:     "foo/bar --remote",
+			wantErr: true,
+			errMsg:  "the `--remote` flag is unsupported when a repository argument is provided",
+		},
 	}
 
 	for _, tt := range tests {
@@ -211,7 +218,7 @@ func TestRepoFork(t *testing.T) {
 		httpStubs   func(*httpmock.Registry)
 		execStubs   func(*run.CommandStubber)
 		promptStubs func(*prompter.MockPrompter)
-		cfgStubs    func(*testing.T, config.Config)
+		cfgStubs    func(*testing.T, gh.Config)
 		remotes     []*context.Remote
 		wantOut     string
 		wantErrOut  string
@@ -233,6 +240,9 @@ func TestRepoFork(t *testing.T) {
 					Repo: ghrepo.New("OWNER", "REPO"),
 				},
 			},
+			cfgStubs: func(_ *testing.T, c gh.Config) {
+				c.Set("", "git_protocol", "https")
+			},
 			httpStubs: forkPost,
 			execStubs: func(cs *run.CommandStubber) {
 				cs.Register(`git remote add fork https://github\.com/someone/REPO\.git`, 0, "")
@@ -253,9 +263,6 @@ func TestRepoFork(t *testing.T) {
 					}},
 					Repo: ghrepo.New("OWNER", "REPO"),
 				},
-			},
-			cfgStubs: func(_ *testing.T, c config.Config) {
-				c.Set("", "git_protocol", "")
 			},
 			httpStubs: forkPost,
 			execStubs: func(cs *run.CommandStubber) {
@@ -297,7 +304,7 @@ func TestRepoFork(t *testing.T) {
 					return true, nil
 				})
 			},
-			wantErrOut: "✓ Created fork someone/REPO\n✓ Added remote origin\n",
+			wantErrOut: "✓ Created fork someone/REPO\n✓ Renamed remote origin to upstream\n✓ Added remote origin\n",
 		},
 		{
 			name: "implicit tty reuse existing remote",
@@ -369,7 +376,7 @@ func TestRepoFork(t *testing.T) {
 				cs.Register("git remote rename origin upstream", 0, "")
 				cs.Register(`git remote add origin https://github.com/someone/REPO.git`, 0, "")
 			},
-			wantErrOut: "✓ Created fork someone/REPO\n✓ Added remote origin\n",
+			wantErrOut: "✓ Created fork someone/REPO\n✓ Renamed remote origin to upstream\n✓ Added remote origin\n",
 		},
 		{
 			name: "implicit nontty reuse existing remote",
@@ -389,6 +396,7 @@ func TestRepoFork(t *testing.T) {
 				},
 			},
 			httpStubs: forkPost,
+			wantOut:   "https://github.com/someone/REPO\n",
 		},
 		{
 			name: "implicit nontty remote exists",
@@ -423,11 +431,13 @@ func TestRepoFork(t *testing.T) {
 				cs.Register("git remote rename origin upstream", 0, "")
 				cs.Register(`git remote add origin https://github.com/someone/REPO.git`, 0, "")
 			},
+			wantOut: "https://github.com/someone/REPO\n",
 		},
 		{
 			name:      "implicit nontty no args",
 			opts:      &ForkOptions{},
 			httpStubs: forkPost,
+			wantOut:   "https://github.com/someone/REPO\n",
 		},
 		{
 			name: "passes git flags",
@@ -560,6 +570,7 @@ func TestRepoFork(t *testing.T) {
 				Repository: "OWNER/REPO",
 			},
 			httpStubs: forkPost,
+			wantOut:   "https://github.com/someone/REPO\n",
 		},
 		{
 			name: "repo arg nontty repo already exists",
@@ -603,6 +614,7 @@ func TestRepoFork(t *testing.T) {
 				cs.Register(`git -C REPO fetch upstream`, 0, "")
 				cs.Register(`git -C REPO config --add remote.upstream.gh-resolved base`, 0, "")
 			},
+			wantOut: "https://github.com/someone/REPO\n",
 		},
 		{
 			name: "non tty repo arg with fork-name",
@@ -639,6 +651,7 @@ func TestRepoFork(t *testing.T) {
 					httpmock.StringResponse(renameResult))
 			},
 			wantErrOut: "",
+			wantOut:    "https://github.com/OWNER/REPO\n",
 		},
 		{
 			name: "tty repo arg with fork-name",
@@ -693,6 +706,7 @@ func TestRepoFork(t *testing.T) {
 				cs.Register(`git -C REPO fetch upstream`, 0, "")
 				cs.Register(`git -C REPO config --add remote.upstream.gh-resolved base`, 0, "")
 			},
+			wantOut: "https://github.com/someone/REPO\n",
 		},
 		{
 			name: "does not retry clone if error occurs and exit code is not 128",
@@ -735,7 +749,7 @@ func TestRepoFork(t *testing.T) {
 			if tt.cfgStubs != nil {
 				tt.cfgStubs(t, cfg)
 			}
-			tt.opts.Config = func() (config.Config, error) {
+			tt.opts.Config = func() (gh.Config, error) {
 				return cfg, nil
 			}
 

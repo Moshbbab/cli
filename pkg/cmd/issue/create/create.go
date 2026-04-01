@@ -4,30 +4,37 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/browser"
-	"github.com/cli/cli/v2/internal/config"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/internal/text"
 	prShared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/set"
 	"github.com/spf13/cobra"
 )
 
 type CreateOptions struct {
-	HttpClient func() (*http.Client, error)
-	Config     func() (config.Config, error)
-	IO         *iostreams.IOStreams
-	BaseRepo   func() (ghrepo.Interface, error)
-	Browser    browser.Browser
-	Prompter   prShared.Prompt
+	HttpClient       func() (*http.Client, error)
+	Config           func() (gh.Config, error)
+	IO               *iostreams.IOStreams
+	BaseRepo         func() (ghrepo.Interface, error)
+	Browser          browser.Browser
+	Prompter         prShared.Prompt
+	Detector         fd.Detector
+	TitledEditSurvey func(string, string) (string, string, error)
 
 	RootDirOverride string
 
 	HasRepoOverride bool
+	EditorMode      bool
 	WebMode         bool
 	RecoverFile     string
 
@@ -49,6 +56,8 @@ func NewCmdCreate(f *cmdutil.Factory, runF func(*CreateOptions) error) *cobra.Co
 		Config:     f.Config,
 		Browser:    f.Browser,
 		Prompter:   f.Prompter,
+
+		TitledEditSurvey: prShared.TitledEditSurvey(&prShared.UserEditor{Config: f.Config, IO: f.IOStreams}),
 	}
 
 	var bodyFile string
@@ -61,6 +70,10 @@ func NewCmdCreate(f *cmdutil.Factory, runF func(*CreateOptions) error) *cobra.Co
 
 			Adding an issue to projects requires authorization with the %[1]sproject%[1]s scope.
 			To authorize, run %[1]sgh auth refresh -s project%[1]s.
+
+			The %[1]s--assignee%[1]s flag supports the following special values:
+			- %[1]s@me%[1]s: assign yourself
+			- %[1]s@copilot%[1]s: assign Copilot (not supported on GitHub Enterprise Server)
 		`, "`"),
 		Example: heredoc.Doc(`
 			$ gh issue create --title "I found a bug" --body "Nothing works"
@@ -68,7 +81,9 @@ func NewCmdCreate(f *cmdutil.Factory, runF func(*CreateOptions) error) *cobra.Co
 			$ gh issue create --label bug --label "help wanted"
 			$ gh issue create --assignee monalisa,hubot
 			$ gh issue create --assignee "@me"
+			$ gh issue create --assignee "@copilot"
 			$ gh issue create --project "Roadmap"
+			$ gh issue create --template "Bug Report"
 		`),
 		Args:    cmdutil.NoArgsQuoteReminder,
 		Aliases: []string{"new"},
@@ -76,6 +91,12 @@ func NewCmdCreate(f *cmdutil.Factory, runF func(*CreateOptions) error) *cobra.Co
 			// support `-R, --repo` override
 			opts.BaseRepo = f.BaseRepo
 			opts.HasRepoOverride = cmd.Flags().Changed("repo")
+
+			var err error
+			opts.EditorMode, err = prShared.InitEditorMode(f, opts.EditorMode, opts.WebMode, opts.IO.CanPrompt())
+			if err != nil {
+				return err
+			}
 
 			titleProvided := cmd.Flags().Changed("title")
 			bodyProvided := cmd.Flags().Changed("body")
@@ -96,7 +117,7 @@ func NewCmdCreate(f *cmdutil.Factory, runF func(*CreateOptions) error) *cobra.Co
 				return errors.New("`--template` is not supported when using `--body` or `--body-file`")
 			}
 
-			opts.Interactive = !(titleProvided && bodyProvided)
+			opts.Interactive = !opts.EditorMode && !(titleProvided && bodyProvided)
 
 			if opts.Interactive && !opts.IO.CanPrompt() {
 				return cmdutil.FlagErrorf("must provide `--title` and `--body` when not running interactively")
@@ -112,10 +133,11 @@ func NewCmdCreate(f *cmdutil.Factory, runF func(*CreateOptions) error) *cobra.Co
 	cmd.Flags().StringVarP(&opts.Title, "title", "t", "", "Supply a title. Will prompt for one otherwise.")
 	cmd.Flags().StringVarP(&opts.Body, "body", "b", "", "Supply a body. Will prompt for one otherwise.")
 	cmd.Flags().StringVarP(&bodyFile, "body-file", "F", "", "Read body text from `file` (use \"-\" to read from standard input)")
+	cmd.Flags().BoolVarP(&opts.EditorMode, "editor", "e", false, "Skip prompts and open the text editor to write the title and body in. The first line is the title and the remaining text is the body.")
 	cmd.Flags().BoolVarP(&opts.WebMode, "web", "w", false, "Open the browser to create an issue")
 	cmd.Flags().StringSliceVarP(&opts.Assignees, "assignee", "a", nil, "Assign people by their `login`. Use \"@me\" to self-assign.")
 	cmd.Flags().StringSliceVarP(&opts.Labels, "label", "l", nil, "Add labels by `name`")
-	cmd.Flags().StringSliceVarP(&opts.Projects, "project", "p", nil, "Add the issue to projects by `name`")
+	cmd.Flags().StringSliceVarP(&opts.Projects, "project", "p", nil, "Add the issue to projects by `title`")
 	cmd.Flags().StringVarP(&opts.Milestone, "milestone", "m", "", "Add the issue to a milestone by `name`")
 	cmd.Flags().StringVar(&opts.RecoverFile, "recover", "", "Recover input from a failed run of create")
 	cmd.Flags().StringVarP(&opts.Template, "template", "T", "", "Template `name` to use as starting body text")
@@ -135,6 +157,19 @@ func createRun(opts *CreateOptions) (err error) {
 		return
 	}
 
+	// TODO projectsV1Deprecation
+	// Remove this section as we should no longer need to detect
+	if opts.Detector == nil {
+		cachedClient := api.NewCachedHTTPClient(httpClient, time.Hour*24)
+		opts.Detector = fd.NewDetector(cachedClient, baseRepo.RepoHost())
+	}
+
+	projectsV1Support := opts.Detector.ProjectsV1()
+	issueFeatures, err := opts.Detector.IssueFeatures()
+	if err != nil {
+		return err
+	}
+
 	isTerminal := opts.IO.IsStdoutTTY()
 
 	var milestones []string
@@ -142,20 +177,25 @@ func createRun(opts *CreateOptions) (err error) {
 		milestones = []string{opts.Milestone}
 	}
 
-	meReplacer := prShared.NewMeReplacer(apiClient, baseRepo.RepoHost())
-	assignees, err := meReplacer.ReplaceSlice(opts.Assignees)
+	// Replace special values in assignees
+	// For web mode, @copilot should be replaced by name; otherwise, login.
+	assigneeReplacer := prShared.NewSpecialAssigneeReplacer(apiClient, baseRepo.RepoHost(), issueFeatures.ApiActorsSupported, !opts.WebMode)
+	assignees, err := assigneeReplacer.ReplaceSlice(opts.Assignees)
 	if err != nil {
 		return err
 	}
+	assigneeSet := set.NewStringSet()
+	assigneeSet.AddValues(assignees)
 
 	tb := prShared.IssueMetadataState{
-		Type:       prShared.IssueMetadata,
-		Assignees:  assignees,
-		Labels:     opts.Labels,
-		Projects:   opts.Projects,
-		Milestones: milestones,
-		Title:      opts.Title,
-		Body:       opts.Body,
+		Type:               prShared.IssueMetadata,
+		ApiActorsSupported: issueFeatures.ApiActorsSupported, // TODO ApiActorsSupported
+		Assignees:          assigneeSet.ToSlice(),
+		Labels:             opts.Labels,
+		ProjectTitles:      opts.Projects,
+		Milestones:         milestones,
+		Title:              opts.Title,
+		Body:               opts.Body,
 	}
 
 	if opts.RecoverFile != "" {
@@ -171,7 +211,7 @@ func createRun(opts *CreateOptions) (err error) {
 	if opts.WebMode {
 		var openURL string
 		if opts.Title != "" || opts.Body != "" || tb.HasMetadata() {
-			openURL, err = generatePreviewURL(apiClient, baseRepo, tb)
+			openURL, err = generatePreviewURL(apiClient, baseRepo, tb, projectsV1Support)
 			if err != nil {
 				return
 			}
@@ -194,7 +234,7 @@ func createRun(opts *CreateOptions) (err error) {
 		fmt.Fprintf(opts.IO.ErrOut, "\nCreating issue in %s\n\n", ghrepo.FullName(baseRepo))
 	}
 
-	repo, err := api.GitHubRepo(apiClient, baseRepo)
+	repo, err := api.IssueRepoInfo(apiClient, baseRepo)
 	if err != nil {
 		return
 	}
@@ -211,7 +251,7 @@ func createRun(opts *CreateOptions) (err error) {
 		defer prShared.PreserveInput(opts.IO, &tb, &err)()
 
 		if opts.Title == "" {
-			err = prShared.TitleSurvey(opts.Prompter, &tb)
+			err = prShared.TitleSurvey(opts.Prompter, opts.IO, &tb)
 			if err != nil {
 				return
 			}
@@ -249,7 +289,7 @@ func createRun(opts *CreateOptions) (err error) {
 			}
 		}
 
-		openURL, err = generatePreviewURL(apiClient, baseRepo, tb)
+		openURL, err = generatePreviewURL(apiClient, baseRepo, tb, projectsV1Support)
 		if err != nil {
 			return
 		}
@@ -268,7 +308,11 @@ func createRun(opts *CreateOptions) (err error) {
 				Repo:      baseRepo,
 				State:     &tb,
 			}
-			err = prShared.MetadataSurvey(opts.Prompter, opts.IO, baseRepo, fetcher, &tb)
+			var assigneeSearchFunc func(string) prompter.MultiSelectSearchResult
+			if issueFeatures.ApiActorsSupported {
+				assigneeSearchFunc = prShared.RepoAssigneeSearchFunc(apiClient, baseRepo)
+			}
+			err = prShared.MetadataSurvey(opts.Prompter, opts.IO, baseRepo, fetcher, &tb, projectsV1Support, nil, assigneeSearchFunc)
 			if err != nil {
 				return
 			}
@@ -285,6 +329,25 @@ func createRun(opts *CreateOptions) (err error) {
 			return
 		}
 	} else {
+		if opts.EditorMode {
+			if opts.Template != "" {
+				var template prShared.Template
+				template, err = tpl.Select(opts.Template)
+				if err != nil {
+					return
+				}
+				if tb.Title == "" {
+					tb.Title = template.Title()
+				}
+				templateNameForSubmit = template.NameForSubmit()
+				tb.Body = string(template.Body())
+			}
+
+			tb.Title, tb.Body, err = opts.TitledEditSurvey(tb.Title, tb.Body)
+			if err != nil {
+				return
+			}
+		}
 		if tb.Title == "" {
 			err = fmt.Errorf("title can't be blank")
 			return
@@ -305,7 +368,7 @@ func createRun(opts *CreateOptions) (err error) {
 			params["issueTemplate"] = templateNameForSubmit
 		}
 
-		err = prShared.AddMetadataToIssueParams(apiClient, baseRepo, params, &tb)
+		err = prShared.AddMetadataToIssueParams(apiClient, baseRepo, params, &tb, projectsV1Support)
 		if err != nil {
 			return
 		}
@@ -324,7 +387,7 @@ func createRun(opts *CreateOptions) (err error) {
 	return
 }
 
-func generatePreviewURL(apiClient *api.Client, baseRepo ghrepo.Interface, tb prShared.IssueMetadataState) (string, error) {
+func generatePreviewURL(apiClient *api.Client, baseRepo ghrepo.Interface, tb prShared.IssueMetadataState, projectsV1Support gh.ProjectsV1Support) (string, error) {
 	openURL := ghrepo.GenerateRepoURL(baseRepo, "issues/new")
-	return prShared.WithPrAndIssueQueryParams(apiClient, baseRepo, openURL, tb)
+	return prShared.WithPrAndIssueQueryParams(apiClient, baseRepo, openURL, tb, projectsV1Support)
 }

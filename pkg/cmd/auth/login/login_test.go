@@ -2,6 +2,7 @@ package login
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"regexp"
 	"runtime"
@@ -10,6 +11,7 @@ import (
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/git"
 	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/internal/run"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -128,6 +130,26 @@ func Test_NewCmdLogin(t *testing.T) {
 			},
 		},
 		{
+			name:     "tty web and clipboard",
+			stdinTTY: true,
+			cli:      "--web --clipboard",
+			wants: LoginOptions{
+				Hostname:    "github.com",
+				Web:         true,
+				Interactive: true,
+				Clipboard:   true,
+			},
+		},
+		{
+			name: "nontty web and clipboard",
+			cli:  "--web --clipboard",
+			wants: LoginOptions{
+				Hostname:  "github.com",
+				Web:       true,
+				Clipboard: true,
+			},
+		},
+		{
 			name:     "tty web",
 			stdinTTY: true,
 			cli:      "--web",
@@ -204,6 +226,23 @@ func Test_NewCmdLogin(t *testing.T) {
 				InsecureStorage: true,
 			},
 		},
+		{
+			name:     "tty skip-ssh-key",
+			stdinTTY: true,
+			cli:      "--skip-ssh-key",
+			wants: LoginOptions{
+				SkipSSHKeyPrompt: true,
+				Interactive:      true,
+			},
+		},
+		{
+			name: "nontty skip-ssh-key",
+			cli:  "--skip-ssh-key",
+			wants: LoginOptions{
+				Hostname:         "github.com",
+				SkipSSHKeyPrompt: true,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -254,6 +293,7 @@ func Test_NewCmdLogin(t *testing.T) {
 			assert.Equal(t, tt.wants.Web, gotOpts.Web)
 			assert.Equal(t, tt.wants.Interactive, gotOpts.Interactive)
 			assert.Equal(t, tt.wants.Scopes, gotOpts.Scopes)
+			assert.Equal(t, tt.wants.Clipboard, gotOpts.Clipboard)
 		})
 	}
 }
@@ -264,7 +304,7 @@ func Test_loginRun_nontty(t *testing.T) {
 		opts            *LoginOptions
 		env             map[string]string
 		httpStubs       func(*httpmock.Registry)
-		cfgStubs        func(*testing.T, config.Config)
+		cfgStubs        func(*testing.T, gh.Config)
 		wantHosts       string
 		wantErr         string
 		wantStderr      string
@@ -400,7 +440,7 @@ func Test_loginRun_nontty(t *testing.T) {
 				Hostname: "github.com",
 				Token:    "newUserToken",
 			},
-			cfgStubs: func(t *testing.T, c config.Config) {
+			cfgStubs: func(t *testing.T, c gh.Config) {
 				_, err := c.Authentication().Login("github.com", "monalisa", "abc123", "https", false)
 				require.NoError(t, err)
 			},
@@ -434,13 +474,16 @@ func Test_loginRun_nontty(t *testing.T) {
 			if tt.cfgStubs != nil {
 				tt.cfgStubs(t, cfg)
 			}
-			tt.opts.Config = func() (config.Config, error) {
+			tt.opts.Config = func() (gh.Config, error) {
 				return cfg, nil
 			}
 
 			reg := &httpmock.Registry{}
 			defer reg.Verify(t)
 			tt.opts.HttpClient = func() (*http.Client, error) {
+				return &http.Client{Transport: reg}, nil
+			}
+			tt.opts.PlainHttpClient = func() (*http.Client, error) {
 				return &http.Client{Transport: reg}, nil
 			}
 			if tt.httpStubs != nil {
@@ -483,7 +526,7 @@ func Test_loginRun_Survey(t *testing.T) {
 		httpStubs       func(*httpmock.Registry)
 		prompterStubs   func(*prompter.PrompterMock)
 		runStubs        func(*run.CommandStubber)
-		cfgStubs        func(*testing.T, config.Config)
+		cfgStubs        func(*testing.T, gh.Config)
 		wantHosts       string
 		wantErrOut      *regexp.Regexp
 		wantSecureToken string
@@ -528,7 +571,7 @@ func Test_loginRun_Survey(t *testing.T) {
 			wantErrOut: regexp.MustCompile("Tip: you can generate a Personal Access Token here https://rebecca.chambers/settings/tokens"),
 		},
 		{
-			name: "choose enterprise",
+			name: "choose Other",
 			wantHosts: heredoc.Doc(`
                 brad.vickers:
                     users:
@@ -545,8 +588,8 @@ func Test_loginRun_Survey(t *testing.T) {
 			prompterStubs: func(pm *prompter.PrompterMock) {
 				pm.SelectFunc = func(prompt, _ string, opts []string) (int, error) {
 					switch prompt {
-					case "What account do you want to log into?":
-						return prompter.IndexFor(opts, "GitHub Enterprise Server")
+					case "Where do you use GitHub?":
+						return prompter.IndexFor(opts, "Other")
 					case "What is your preferred protocol for Git operations on this host?":
 						return prompter.IndexFor(opts, "HTTPS")
 					case "How would you like to authenticate GitHub CLI?":
@@ -588,7 +631,7 @@ func Test_loginRun_Survey(t *testing.T) {
 			prompterStubs: func(pm *prompter.PrompterMock) {
 				pm.SelectFunc = func(prompt, _ string, opts []string) (int, error) {
 					switch prompt {
-					case "What account do you want to log into?":
+					case "Where do you use GitHub?":
 						return prompter.IndexFor(opts, "GitHub.com")
 					case "What is your preferred protocol for Git operations on this host?":
 						return prompter.IndexFor(opts, "HTTPS")
@@ -622,7 +665,7 @@ func Test_loginRun_Survey(t *testing.T) {
 			prompterStubs: func(pm *prompter.PrompterMock) {
 				pm.SelectFunc = func(prompt, _ string, opts []string) (int, error) {
 					switch prompt {
-					case "What account do you want to log into?":
+					case "Where do you use GitHub?":
 						return prompter.IndexFor(opts, "GitHub.com")
 					case "What is your preferred protocol for Git operations on this host?":
 						return prompter.IndexFor(opts, "SSH")
@@ -683,7 +726,7 @@ func Test_loginRun_Survey(t *testing.T) {
 					return -1, prompter.NoSuchPromptErr(prompt)
 				}
 			},
-			cfgStubs: func(t *testing.T, c config.Config) {
+			cfgStubs: func(t *testing.T, c gh.Config) {
 				_, err := c.Authentication().Login("github.com", "monalisa", "abc123", "https", false)
 				require.NoError(t, err)
 			},
@@ -727,12 +770,15 @@ func Test_loginRun_Survey(t *testing.T) {
 			if tt.cfgStubs != nil {
 				tt.cfgStubs(t, cfg)
 			}
-			tt.opts.Config = func() (config.Config, error) {
+			tt.opts.Config = func() (gh.Config, error) {
 				return cfg, nil
 			}
 
 			reg := &httpmock.Registry{}
 			tt.opts.HttpClient = func() (*http.Client, error) {
+				return &http.Client{Transport: reg}, nil
+			}
+			tt.opts.PlainHttpClient = func() (*http.Client, error) {
 				return &http.Client{Transport: reg}, nil
 			}
 			if tt.httpStubs != nil {
@@ -782,6 +828,53 @@ func Test_loginRun_Survey(t *testing.T) {
 				assert.Regexp(t, tt.wantErrOut, stderr.String())
 			}
 			reg.Verify(t)
+		})
+	}
+}
+
+func Test_promptForHostname(t *testing.T) {
+	tests := []struct {
+		name          string
+		options       []string
+		selectedIndex int
+		// This is so we can test that the options in the function don't change
+		expectedSelection string
+		inputHostname     string
+		expect            string
+	}{
+		{
+			name:              "select 'GitHub.com'",
+			selectedIndex:     0,
+			expectedSelection: "GitHub.com",
+			expect:            "github.com",
+		},
+		{
+			name:              "select 'Other'",
+			selectedIndex:     1,
+			expectedSelection: "Other",
+			inputHostname:     "github.enterprise.com",
+			expect:            "github.enterprise.com",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			promptMock := &prompter.PrompterMock{
+				SelectFunc: func(_ string, _ string, options []string) (int, error) {
+					if options[tt.selectedIndex] != tt.expectedSelection {
+						return 0, fmt.Errorf("expected %s at index %d, but got %s", tt.expectedSelection, tt.selectedIndex, options[tt.selectedIndex])
+					}
+					return tt.selectedIndex, nil
+				},
+				InputHostnameFunc: func() (string, error) {
+					return tt.inputHostname, nil
+				},
+			}
+			opts := &LoginOptions{
+				Prompter: promptMock,
+			}
+			hostname, err := promptForHostname(opts)
+			require.NoError(t, err)
+			require.Equal(t, tt.expect, hostname)
 		})
 	}
 }

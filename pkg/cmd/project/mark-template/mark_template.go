@@ -29,12 +29,12 @@ type markTemplateConfig struct {
 
 type markProjectTemplateMutation struct {
 	TemplateProject struct {
-		Project queries.Project `graphql:"projectV2"`
+		Project queries.ProjectMutationQuery `graphql:"projectV2"`
 	} `graphql:"markProjectV2AsTemplate(input:$input)"`
 }
 type unmarkProjectTemplateMutation struct {
 	TemplateProject struct {
-		Project queries.Project `graphql:"projectV2"`
+		Project queries.ProjectMutationQuery `graphql:"projectV2"`
 	} `graphql:"unmarkProjectV2AsTemplate(input:$input)"`
 }
 
@@ -44,11 +44,11 @@ func NewCmdMarkTemplate(f *cmdutil.Factory, runF func(config markTemplateConfig)
 		Short: "Mark a project as a template",
 		Use:   "mark-template [<number>]",
 		Example: heredoc.Doc(`
-			# mark the github org's project "1" as a template
-			gh project mark-template 1 --owner "github"
+			# Mark the github org's project "1" as a template
+			$ gh project mark-template 1 --owner "github"
 
-			# unmark the github org's project "1" as a template
-			gh project mark-template 1 --owner "github" --undo
+			# Unmark the github org's project "1" as a template
+			$ gh project mark-template 1 --owner "github" --undo
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -150,7 +150,7 @@ func unmarkTemplateArgs(config markTemplateConfig) (*unmarkProjectTemplateMutati
 	}
 }
 
-func printResults(config markTemplateConfig, project queries.Project) error {
+func printResults(config markTemplateConfig, project queries.ProjectMutationQuery) error {
 	if !config.io.IsStdoutTTY() {
 		return nil
 	}

@@ -10,7 +10,7 @@ import (
 	"github.com/cli/cli/v2/api"
 	ghContext "github.com/cli/cli/v2/context"
 	"github.com/cli/cli/v2/git"
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -88,7 +88,7 @@ func NewCmdMerge(f *cmdutil.Factory, runF func(*MergeOptions) error) *cobra.Comm
 			If required checks have not yet passed, auto-merge will be enabled.
 			If required checks have passed, the pull request will be added to the merge queue.
 			To bypass a merge queue and merge directly, pass the %[1]s--admin%[1]s flag.
-    	`, "`"),
+		`, "`"),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Finder = shared.NewFinder(f)
@@ -241,7 +241,14 @@ func (m *mergeContext) warnIfDiverged() {
 // Check if the current state of the pull request allows for merging
 func (m *mergeContext) canMerge() error {
 	if m.mergeQueueRequired {
-		// a pull request can always be added to the merge queue
+		// Requesting branch deletion on a PR with a merge queue
+		// policy is not allowed. Doing so can unexpectedly
+		// delete branches before merging, close the PR, and remove
+		// the PR from the merge queue.
+		if m.opts.DeleteBranch {
+			return fmt.Errorf("%s Cannot use `-d` or `--delete-branch` when merge queue enabled", m.cs.FailureIcon())
+		}
+		// Otherwise, a pull request can always be added to the merge queue
 		return nil
 	}
 
@@ -377,13 +384,14 @@ func (m *mergeContext) deleteLocalBranch() error {
 
 	if m.merged {
 		if m.opts.IO.CanPrompt() && !m.opts.IsDeleteBranchIndicated {
-			confirmed, err := m.opts.Prompter.Confirm(fmt.Sprintf("Pull request %s#%d was already merged. Delete the branch locally?", ghrepo.FullName(m.baseRepo), m.pr.Number), false)
+			message := fmt.Sprintf("Pull request %s#%d was already merged. Delete the branch locally?", ghrepo.FullName(m.baseRepo), m.pr.Number)
+			confirmed, err := m.opts.Prompter.Confirm(message, false)
 			if err != nil {
 				return fmt.Errorf("could not prompt: %w", err)
 			}
 			m.deleteBranch = confirmed
 		} else {
-			_ = m.warnf(fmt.Sprintf("%s Pull request %s#%d was already merged\n", m.cs.WarningIcon(), ghrepo.FullName(m.baseRepo), m.pr.Number))
+			_ = m.warnf("%s Pull request %s#%d was already merged\n", m.cs.WarningIcon(), ghrepo.FullName(m.baseRepo), m.pr.Number)
 		}
 	}
 
@@ -424,7 +432,7 @@ func (m *mergeContext) deleteLocalBranch() error {
 		}
 
 		if err := m.opts.GitClient.Pull(ctx, baseRemote.Name, targetBranch); err != nil {
-			_ = m.warnf(fmt.Sprintf("%s warning: not possible to fast-forward to: %q\n", m.cs.WarningIcon(), targetBranch))
+			_ = m.warnf("%s warning: not possible to fast-forward to: %q\n", m.cs.WarningIcon(), targetBranch)
 		}
 
 		switchedToBranch = targetBranch
@@ -452,10 +460,22 @@ func (m *mergeContext) deleteRemoteBranch() error {
 	if !m.merged {
 		apiClient := api.NewClientFromHTTP(m.httpClient)
 		err := api.BranchDeleteRemote(apiClient, m.baseRepo, m.pr.HeadRefName)
-		var httpErr api.HTTPError
-		// The ref might have already been deleted by GitHub
-		if err != nil && (!errors.As(err, &httpErr) || httpErr.StatusCode != 422) {
-			return fmt.Errorf("failed to delete remote branch %s: %w", m.cs.Cyan(m.pr.HeadRefName), err)
+		if err != nil {
+			// Normally, the API returns 422, with the message "Reference does not exist"
+			// when the branch has already been deleted. It also returns 404 with the same
+			// message, but that rarely happens. In both cases, we should not return an
+			// error because the goal is already achieved.
+
+			var isAlreadyDeletedError bool
+			if httpErr := (api.HTTPError{}); errors.As(err, &httpErr) {
+				// TODO: since the API returns 422 for a couple of other reasons, for more accuracy
+				// we might want to check the error message against "Reference does not exist".
+				isAlreadyDeletedError = httpErr.StatusCode == http.StatusUnprocessableEntity || httpErr.StatusCode == http.StatusNotFound
+			}
+
+			if !isAlreadyDeletedError {
+				return fmt.Errorf("failed to delete remote branch %s: %w", m.cs.Cyan(m.pr.HeadRefName), err)
+			}
 		}
 	}
 
@@ -680,7 +700,7 @@ func confirmSubmission(client *http.Client, opts *MergeOptions, action shared.Ac
 
 type userEditor struct {
 	io     *iostreams.IOStreams
-	config func() (config.Config, error)
+	config func() (gh.Config, error)
 }
 
 func (e *userEditor) Edit(filename, startingText string) (string, error) {

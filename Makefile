@@ -38,10 +38,15 @@ completions: bin/gh$(EXE)
 	bin/gh$(EXE) completion -s fish > ./share/fish/vendor_completions.d/gh.fish
 	bin/gh$(EXE) completion -s zsh > ./share/zsh/site-functions/_gh
 
-# just a convenience task around `go test`
+# just convenience tasks around `go test`
 .PHONY: test
 test:
 	go test ./...
+
+# For more information, see https://github.com/cli/cli/blob/trunk/acceptance/README.md
+.PHONY: acceptance
+acceptance:
+	go test -tags acceptance ./acceptance
 
 ## Site-related tasks are exclusively intended for use by the GitHub CLI team and for our release automation.
 
@@ -69,7 +74,7 @@ endif
 ## Install/uninstall tasks are here for use on *nix platform. On Windows, there is no equivalent.
 
 DESTDIR :=
-prefix  := /usr/local
+prefix  ?= /usr/local
 bindir  := ${prefix}/bin
 datadir := ${prefix}/share
 mandir  := ${datadir}/man
@@ -93,3 +98,19 @@ uninstall:
 	rm -f ${DESTDIR}${datadir}/bash-completion/completions/gh
 	rm -f ${DESTDIR}${datadir}/fish/vendor_completions.d/gh.fish
 	rm -f ${DESTDIR}${datadir}/zsh/site-functions/_gh
+
+.PHONY: macospkg
+macospkg: manpages completions
+ifndef VERSION
+	$(error VERSION is not set. Use `make macospkg VERSION=vX.Y.Z`)
+endif
+	./script/release --local "$(VERSION)" --platform macos
+	./script/pkgmacos $(VERSION)
+
+.PHONY: licenses
+licenses:
+	./script/licenses $$(go env GOOS) $$(go env GOARCH)
+
+.PHONY: licenses-check
+licenses-check:
+	./script/licenses --check

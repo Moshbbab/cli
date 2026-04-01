@@ -56,11 +56,11 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman
 		Short: "View the summary of a workflow",
 		Args:  cobra.MaximumNArgs(1),
 		Example: heredoc.Doc(`
-		  # Interactively select a workflow to view
-		  $ gh workflow view
+			# Interactively select a workflow to view
+			$ gh workflow view
 
-		  # View a specific workflow
-		  $ gh workflow view 0451
+			# View a specific workflow
+			$ gh workflow view 0451
 		`),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// support `-R, --repo` override
@@ -175,7 +175,7 @@ func viewWorkflowContent(opts *ViewOptions, client *api.Client, repo ghrepo.Inte
 		out := opts.IO.Out
 
 		fileName := workflow.Base()
-		fmt.Fprintf(out, "%s - %s\n", cs.Bold(workflow.Name), cs.Gray(fileName))
+		fmt.Fprintf(out, "%s - %s\n", cs.Bold(workflow.Name), cs.Muted(fileName))
 		fmt.Fprintf(out, "ID: %s", cs.Cyanf("%d", workflow.ID))
 
 		codeBlock := fmt.Sprintf("```yaml\n%s\n```", yaml)

@@ -2,18 +2,19 @@ package link
 
 import (
 	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/pkg/cmd/project/shared/client"
 	"github.com/cli/cli/v2/pkg/cmd/project/shared/queries"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/spf13/cobra"
-	"net/http"
-	"strconv"
-	"strings"
 )
 
 type linkOpts struct {
@@ -30,7 +31,7 @@ type linkOpts struct {
 
 type linkConfig struct {
 	httpClient func() (*http.Client, error)
-	config     func() (config.Config, error)
+	config     func() (gh.Config, error)
 	client     *queries.Client
 	opts       linkOpts
 	io         *iostreams.IOStreams
@@ -40,16 +41,16 @@ func NewCmdLink(f *cmdutil.Factory, runF func(config linkConfig) error) *cobra.C
 	opts := linkOpts{}
 	linkCmd := &cobra.Command{
 		Short: "Link a project to a repository or a team",
-		Use:   "link [<number>] [flag]",
+		Use:   "link [<number>]",
 		Example: heredoc.Doc(`
-			# link monalisa's project 1 to her repository "my_repo"
-			gh project link 1 --owner monalisa --repo my_repo
+			# Link monalisa's project 1 to her repository "my_repo"
+			$ gh project link 1 --owner monalisa --repo my_repo
 
-			# link monalisa's organization's project 1 to her team "my_team"
-			gh project link 1 --owner my_organization --team my_team
+			# Link monalisa's organization's project 1 to her team "my_team"
+			$ gh project link 1 --owner my_organization --team my_team
 
-			# link monalisa's project 1 to the repository of current directory if neither --repo nor --team is specified
-			gh project link 1
+			# Link monalisa's project 1 to the repository of current directory if neither --repo nor --team is specified
+			$ gh project link 1
 		`),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := client.New(f)

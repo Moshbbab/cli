@@ -12,8 +12,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/pkg/cmd/gist/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -27,7 +28,7 @@ var editNextOptions = []string{"Edit another file", "Submit", "Cancel"}
 type EditOptions struct {
 	IO         *iostreams.IOStreams
 	HttpClient func() (*http.Client, error)
-	Config     func() (config.Config, error)
+	Config     func() (gh.Config, error)
 	Prompter   prompter.Prompter
 
 	Edit func(string, string, string, *iostreams.IOStreams) (string, error)
@@ -58,6 +59,28 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:   "edit {<id> | <url>} [<filename>]",
 		Short: "Edit one of your gists",
+		Example: heredoc.Doc(`
+			# Select a gist to edit interactively
+			$ gh gist edit
+
+			# Edit a gist file in the default editor
+			$ gh gist edit 1234567890abcdef1234567890abcdef
+
+			# Edit a specific file in the gist
+			$ gh gist edit 1234567890abcdef1234567890abcdef --filename hello.py
+
+			# Replace a gist file with content from a local file
+			$ gh gist edit 1234567890abcdef1234567890abcdef --filename hello.py hello.py
+
+			# Add a new file to the gist
+			$ gh gist edit 1234567890abcdef1234567890abcdef --add newfile.py
+
+			# Change the description of the gist
+			$ gh gist edit 1234567890abcdef1234567890abcdef --desc "new description"
+
+			# Remove a file from the gist
+			$ gh gist edit 1234567890abcdef1234567890abcdef --remove hello.py
+		`),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 2 {
 				return cmdutil.FlagErrorf("too many arguments")
@@ -108,15 +131,20 @@ func editRun(opts *EditOptions) error {
 	if gistID == "" {
 		cs := opts.IO.ColorScheme()
 		if gistID == "" {
-			gistID, err = shared.PromptGists(opts.Prompter, client, host, cs)
+			if !opts.IO.CanPrompt() {
+				return cmdutil.FlagErrorf("gist ID or URL required when not running interactively")
+			}
+
+			gist, err := shared.PromptGists(opts.Prompter, client, host, cs)
 			if err != nil {
 				return err
 			}
 
-			if gistID == "" {
+			if gist.ID == "" {
 				fmt.Fprintln(opts.IO.Out, "No gists found.")
 				return nil
 			}
+			gistID = gist.ID
 		}
 	}
 
@@ -209,11 +237,12 @@ func editRun(opts *EditOptions) error {
 
 	// Remove a file from the gist
 	if opts.RemoveFilename != "" {
-		err := removeFile(gistToUpdate, opts.RemoveFilename)
+		files, err := getFilesToRemove(gistToUpdate, opts.RemoveFilename)
 		if err != nil {
 			return err
 		}
 
+		gistToUpdate.Files = files
 		return updateGist(apiClient, host, gistToUpdate)
 	}
 
@@ -231,6 +260,8 @@ func editRun(opts *EditOptions) error {
 		if filename == "" {
 			if len(candidates) == 1 {
 				filename = candidates[0]
+			} else if len(candidates) == 0 {
+				return errors.New("no file in the gist")
 			} else {
 				if !opts.IO.CanPrompt() {
 					return errors.New("unsure what file to edit; either specify --filename or run interactively")
@@ -249,6 +280,20 @@ func editRun(opts *EditOptions) error {
 		}
 		if shared.IsBinaryContents([]byte(gistFile.Content)) {
 			return fmt.Errorf("editing binary files not supported")
+		}
+
+		// If the file is truncated, fetch the full content
+		// but only if it hasn't already been edited in this session
+		file := gist.Files[filename]
+		if file.Truncated {
+			if _, alreadyEdited := filesToUpdate[filename]; !alreadyEdited {
+				fullContent, err := shared.GetRawGistFile(client, file.RawURL)
+				if err != nil {
+					return err
+				}
+
+				gistFile.Content = fullContent
+			}
 		}
 
 		var text string
@@ -321,6 +366,12 @@ func editRun(opts *EditOptions) error {
 		return nil
 	}
 
+	updatedFiles := make(map[string]*gistFileToUpdate, len(filesToUpdate))
+	for filename := range filesToUpdate {
+		updatedFiles[filename] = gistToUpdate.Files[filename]
+	}
+	gistToUpdate.Files = updatedFiles
+
 	return updateGist(apiClient, host, gistToUpdate)
 }
 
@@ -378,11 +429,13 @@ func getFilesToAdd(file string, content []byte) (map[string]*gistFileToUpdate, e
 	}, nil
 }
 
-func removeFile(gist gistToUpdate, filename string) error {
+func getFilesToRemove(gist gistToUpdate, filename string) (map[string]*gistFileToUpdate, error) {
 	if _, found := gist.Files[filename]; !found {
-		return fmt.Errorf("gist has no file %q", filename)
+		return nil, fmt.Errorf("gist has no file %q", filename)
 	}
 
 	gist.Files[filename] = nil
-	return nil
+	return map[string]*gistFileToUpdate{
+		filename: nil,
+	}, nil
 }

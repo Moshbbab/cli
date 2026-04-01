@@ -6,16 +6,19 @@ import (
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/internal/browser"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmd/search/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/cli/cli/v2/pkg/search"
+	ghauth "github.com/cli/go-gh/v2/pkg/auth"
 	"github.com/spf13/cobra"
 )
 
 type CodeOptions struct {
 	Browser  browser.Browser
+	Config   func() (gh.Config, error)
 	Exporter cmdutil.Exporter
 	IO       *iostreams.IOStreams
 	Query    search.Query
@@ -26,6 +29,7 @@ type CodeOptions struct {
 func NewCmdCode(f *cmdutil.Factory, runF func(*CodeOptions) error) *cobra.Command {
 	opts := &CodeOptions{
 		Browser: f.Browser,
+		Config:  f.Config,
 		IO:      f.IOStreams,
 		Query:   search.Query{Kind: search.KindCode},
 	}
@@ -33,33 +37,35 @@ func NewCmdCode(f *cmdutil.Factory, runF func(*CodeOptions) error) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:   "code <query>",
 		Short: "Search within code",
-		Long: heredoc.Doc(`
+		Long: heredoc.Docf(`
 			Search within code in GitHub repositories.
 
 			The search syntax is documented at:
 			<https://docs.github.com/search-github/searching-on-github/searching-code>
 
 			Note that these search results are powered by what is now a legacy GitHub code search engine.
-			The results might not match what is seen on github.com, and new features like regex search
+			The results might not match what is seen on %[1]sgithub.com%[1]s, and new features like regex search
 			are not yet available via the GitHub API.
-		`),
+
+			For more information on handling search queries containing a hyphen, run %[1]sgh search --help%[1]s.
+		`, "`"),
 		Example: heredoc.Doc(`
-			# search code matching "react" and "lifecycle"
+			# Search code matching "react" and "lifecycle"
 			$ gh search code react lifecycle
 
-			# search code matching "error handling" 
+			# Search code matching "error handling"
 			$ gh search code "error handling"
-	
-			# search code matching "deque" in Python files
+
+			# Search code matching "deque" in Python files
 			$ gh search code deque --language=python
 
-			# search code matching "cli" in repositories owned by microsoft organization
+			# Search code matching "cli" in repositories owned by microsoft organization
 			$ gh search code cli --owner=microsoft
 
-			# search code matching "panic" in the GitHub CLI repository
+			# Search code matching "panic" in the GitHub CLI repository
 			$ gh search code panic --repo cli/cli
 
-			# search code matching keyword "lint" in package.json files
+			# Search code matching keyword "lint" in package.json files
 			$ gh search code lint --filename package.json
 		`),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -104,8 +110,26 @@ func NewCmdCode(f *cmdutil.Factory, runF func(*CodeOptions) error) *cobra.Comman
 func codeRun(opts *CodeOptions) error {
 	io := opts.IO
 	if opts.WebMode {
-		// FIXME: convert legacy `filename` and `extension` ES qualifiers to Blackbird's `path` qualifier
-		// when opening web search, otherwise the Blackbird search UI will complain.
+		// Convert `filename` and `extension` legacy search qualifiers to the new code search's `path`
+		// qualifier when used with `--web` because they are incompatible.
+		if opts.Query.Qualifiers.Filename != "" || opts.Query.Qualifiers.Extension != "" {
+			cfg, err := opts.Config()
+			if err != nil {
+				return err
+			}
+			host, _ := cfg.Authentication().DefaultHost()
+			// FIXME: Remove this check once GHES supports the new `path` search qualifier.
+			if !ghauth.IsEnterprise(host) {
+				filename := opts.Query.Qualifiers.Filename
+				extension := opts.Query.Qualifiers.Extension
+				if extension != "" && !strings.HasPrefix(extension, ".") {
+					extension = "." + extension
+				}
+				opts.Query.Qualifiers.Filename = ""
+				opts.Query.Qualifiers.Extension = ""
+				opts.Query.Qualifiers.Path = fmt.Sprintf("%s%s", filename, extension)
+			}
+		}
 		url := opts.Searcher.URL(opts.Query)
 		if io.IsStdoutTTY() {
 			fmt.Fprintf(io.ErrOut, "Opening %s in your browser.\n", text.DisplayURL(url))
@@ -143,7 +167,7 @@ func displayResults(io *iostreams.IOStreams, results search.CodeResult) error {
 			}
 			fmt.Fprintf(io.Out, "%s %s\n", cs.Blue(code.Repository.FullName), cs.GreenBold(code.Path))
 			for _, match := range code.TextMatches {
-				lines := formatMatch(match.Fragment, match.Matches, io.ColorEnabled())
+				lines := formatMatch(match.Fragment, match.Matches, io)
 				for _, line := range lines {
 					fmt.Fprintf(io.Out, "\t%s\n", strings.TrimSpace(line))
 				}
@@ -153,7 +177,7 @@ func displayResults(io *iostreams.IOStreams, results search.CodeResult) error {
 	}
 	for _, code := range results.Items {
 		for _, match := range code.TextMatches {
-			lines := formatMatch(match.Fragment, match.Matches, io.ColorEnabled())
+			lines := formatMatch(match.Fragment, match.Matches, io)
 			for _, line := range lines {
 				fmt.Fprintf(io.Out, "%s:%s: %s\n", cs.Blue(code.Repository.FullName), cs.GreenBold(code.Path), strings.TrimSpace(line))
 			}
@@ -162,7 +186,9 @@ func displayResults(io *iostreams.IOStreams, results search.CodeResult) error {
 	return nil
 }
 
-func formatMatch(t string, matches []search.Match, colorize bool) []string {
+func formatMatch(t string, matches []search.Match, io *iostreams.IOStreams) []string {
+	cs := io.ColorScheme()
+
 	startIndices := map[int]struct{}{}
 	endIndices := map[int]struct{}{}
 	for _, m := range matches {
@@ -186,14 +212,10 @@ func formatMatch(t string, matches []search.Match, colorize bool) []string {
 			continue
 		}
 		if _, ok := startIndices[i]; ok {
-			if colorize {
-				b.WriteString("\x1b[30;43m") // black text on yellow background
-			}
+			b.WriteString(cs.HighlightStart())
 			found = true
 		} else if _, ok := endIndices[i]; ok {
-			if colorize {
-				b.WriteString("\x1b[m") // color reset
-			}
+			b.WriteString(cs.Reset())
 		}
 		b.WriteRune(c)
 	}

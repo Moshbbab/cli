@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/tableprinter"
 	"github.com/cli/cli/v2/pkg/cmd/ssh-key/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -19,7 +19,7 @@ import (
 
 type ListOptions struct {
 	IO         *iostreams.IOStreams
-	Config     func() (config.Config, error)
+	Config     func() (gh.Config, error)
 	HTTPClient func() (*http.Client, error)
 }
 
@@ -89,11 +89,11 @@ func listRun(opts *ListOptions) error {
 			t.AddField(id)
 			t.AddField(sshKey.Key, tableprinter.WithTruncate(truncateMiddle))
 			t.AddField(sshKey.Type)
-			t.AddTimeField(now, sshKey.CreatedAt, cs.Gray)
+			t.AddTimeField(now, sshKey.CreatedAt, cs.Muted)
 		} else {
 			t.AddField(sshKey.Title)
 			t.AddField(sshKey.Key)
-			t.AddTimeField(now, sshKey.CreatedAt, cs.Gray)
+			t.AddTimeField(now, sshKey.CreatedAt, cs.Muted)
 			t.AddField(id)
 			t.AddField(sshKey.Type)
 		}

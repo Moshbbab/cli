@@ -60,7 +60,31 @@ func UpdateIssue(httpClient *http.Client, repo ghrepo.Interface, id string, isPR
 
 	if dirtyExcludingLabels(options) {
 		wg.Go(func() error {
-			return replaceIssueFields(httpClient, repo, id, isPR, options)
+			// updateIssue mutation does not support Actors so assignment needs to
+			// be in a separate request when our assignees are Actors.
+			// Note: this is intentionally done synchronously with updating
+			// other issue fields to ensure consistency with how legacy
+			// user assignees are handled.
+			// https://github.com/cli/cli/pull/10960#discussion_r2086725348
+			// TODO ApiActorsSupported
+			if options.Assignees.Edited && options.ApiActorsSupported {
+				apiClient := api.NewClientFromHTTP(httpClient)
+				logins, err := options.AssigneeLogins(apiClient, repo)
+				if err != nil {
+					return err
+				}
+
+				err = api.ReplaceActorsForAssignableByLogin(apiClient, repo, id, logins)
+				if err != nil {
+					return err
+				}
+			}
+			err := replaceIssueFields(httpClient, repo, id, isPR, options)
+			if err != nil {
+				return err
+			}
+
+			return nil
 		})
 	}
 
@@ -69,14 +93,19 @@ func UpdateIssue(httpClient *http.Client, repo ghrepo.Interface, id string, isPR
 
 func replaceIssueFields(httpClient *http.Client, repo ghrepo.Interface, id string, isPR bool, options Editable) error {
 	apiClient := api.NewClientFromHTTP(httpClient)
-	assigneeIds, err := options.AssigneeIds(apiClient, repo)
-	if err != nil {
-		return err
-	}
 
 	projectIds, err := options.ProjectIds()
 	if err != nil {
 		return err
+	}
+
+	var assigneeIds *[]string
+	// TODO ApiActorsSupported
+	if !options.ApiActorsSupported {
+		assigneeIds, err = options.AssigneeIds(apiClient, repo)
+		if err != nil {
+			return err
+		}
 	}
 
 	milestoneId, err := options.MilestoneId()

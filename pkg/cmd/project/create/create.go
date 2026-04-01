@@ -27,7 +27,7 @@ type createConfig struct {
 
 type createProjectMutation struct {
 	CreateProjectV2 struct {
-		ProjectV2 queries.Project `graphql:"projectV2"`
+		ProjectV2 queries.ProjectMutationQuery `graphql:"projectV2"`
 	} `graphql:"createProjectV2(input:$input)"`
 }
 
@@ -37,8 +37,8 @@ func NewCmdCreate(f *cmdutil.Factory, runF func(config createConfig) error) *cob
 		Short: "Create a project",
 		Use:   "create",
 		Example: heredoc.Doc(`
-			# create a new project owned by login monalisa
-			gh project create --owner monalisa --title "a new project"
+			# Create a new project owned by login monalisa
+			$ gh project create --owner monalisa --title "a new project"
 		`),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := client.New(f)
@@ -104,7 +104,7 @@ func createArgs(config createConfig) (*createProjectMutation, map[string]interfa
 	}
 }
 
-func printResults(config createConfig, project queries.Project) error {
+func printResults(config createConfig, project queries.ProjectMutationQuery) error {
 	if !config.io.IsStdoutTTY() {
 		return nil
 	}

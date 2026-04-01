@@ -10,10 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/MakeNowJust/heredoc"
@@ -115,9 +112,17 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman
 		Long: heredoc.Docf(`
 			View a summary of a workflow run.
 
-			This command does not support authenticating via fine grained PATs
-			as it is not currently possible to create a PAT with the %[1]schecks:read%[1]s permission.
-		`, "`"),
+			Due to platform limitations, %[1]sgh%[1]s may not always be able to associate jobs with their
+			corresponding logs when using the primary method of fetching logs in zip format.
+
+			In such cases, %[1]sgh%[1]s will attempt to fetch logs for each job individually via the API.
+			This fallback is slower and more resource-intensive. If more than 25 job logs are missing,
+			the operation will fail with an error.
+
+			Additionally, due to similar platform constraints, some log lines may not be
+			associated with a specific step within a job. In these cases, the step name will
+			appear as %[1]sUNKNOWN STEP%[1]s in the log output.
+		`, "`", maxAPILogFetchers),
 		Args: cobra.MaximumNArgs(1),
 		Example: heredoc.Doc(`
 			# Interactively select a run to view, optionally selecting a single job
@@ -317,9 +322,23 @@ func runView(opts *ViewOptions) error {
 		}
 		defer runLogZip.Close()
 
-		attachRunLog(&runLogZip.Reader, jobs)
+		zlm := getZipLogMap(&runLogZip.Reader, jobs)
+		segments, err := populateLogSegments(httpClient, repo, jobs, zlm, opts.LogFailed)
+		if err != nil {
+			if errors.Is(err, errTooManyAPILogFetchers) {
+				return fmt.Errorf("too many API requests needed to fetch logs; try narrowing down to a specific job with the `--job` option")
+			}
+			return err
+		}
 
-		return displayRunLog(opts.IO.Out, jobs, opts.LogFailed)
+		if err := displayLogSegments(opts.IO.Out, segments); err != nil {
+			return err
+		}
+
+		if opts.ExitStatus && shared.IsFailureState(run.Conclusion) {
+			return cmdutil.SilentError
+		}
+		return nil
 	}
 
 	prNumber := ""
@@ -337,10 +356,17 @@ func runView(opts *ViewOptions) error {
 	}
 
 	var annotations []shared.Annotation
+	var missingAnnotationsPermissions bool
+
 	for _, job := range jobs {
 		as, err := shared.GetAnnotations(client, repo, job)
 		if err != nil {
-			return fmt.Errorf("failed to get annotations: %w", err)
+			if err != shared.ErrMissingAnnotationsPermissions {
+				return fmt.Errorf("failed to get annotations: %w", err)
+			}
+
+			missingAnnotationsPermissions = true
+			break
 		}
 		annotations = append(annotations, as...)
 	}
@@ -372,7 +398,11 @@ func runView(opts *ViewOptions) error {
 		fmt.Fprintln(out, shared.RenderJobs(cs, jobs, true))
 	}
 
-	if len(annotations) > 0 {
+	if missingAnnotationsPermissions {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, cs.Bold("ANNOTATIONS"))
+		fmt.Fprintln(out, "requesting annotations returned 403 Forbidden as the token does not have sufficient permissions. Note that it is not currently possible to create a fine-grained PAT with the `checks:read` permission.")
+	} else if len(annotations) > 0 {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, cs.Bold("ANNOTATIONS"))
 		fmt.Fprintln(out, shared.RenderAnnotations(cs, annotations))
@@ -385,7 +415,7 @@ func runView(opts *ViewOptions) error {
 			for _, a := range artifacts {
 				expiredBadge := ""
 				if a.Expired {
-					expiredBadge = cs.Gray(" (expired)")
+					expiredBadge = cs.Muted(" (expired)")
 				}
 				fmt.Fprintf(out, "%s%s\n", a.Name, expiredBadge)
 			}
@@ -399,7 +429,7 @@ func runView(opts *ViewOptions) error {
 		} else {
 			fmt.Fprintf(out, "For more information about a job, try: gh run view --job=<job-id>\n")
 		}
-		fmt.Fprintf(out, cs.Gray("View this run on GitHub: %s\n"), run.URL)
+		fmt.Fprintln(out, cs.Mutedf("View this run on GitHub: %s", run.URL))
 
 		if opts.ExitStatus && shared.IsFailureState(run.Conclusion) {
 			return cmdutil.SilentError
@@ -411,7 +441,7 @@ func runView(opts *ViewOptions) error {
 		} else {
 			fmt.Fprintf(out, "To see the full job log, try: gh run view --log --job=%d\n", selectedJob.ID)
 		}
-		fmt.Fprintf(out, cs.Gray("View this run on GitHub: %s\n"), run.URL)
+		fmt.Fprintln(out, cs.Mutedf("View this run on GitHub: %s", run.URL))
 
 		if opts.ExitStatus && shared.IsFailureState(selectedJob.Conclusion) {
 			return cmdutil.SilentError
@@ -519,76 +549,39 @@ func promptForJob(prompter shared.Prompter, cs *iostreams.ColorScheme, jobs []sh
 	return nil, nil
 }
 
-func logFilenameRegexp(job shared.Job, step shared.Step) *regexp.Regexp {
-	// As described in https://github.com/cli/cli/issues/5011#issuecomment-1570713070, there are a number of steps
-	// the server can take when producing the downloaded zip file that can result in a mismatch between the job name
-	// and the filename in the zip including:
-	//  * Removing characters in the job name that aren't allowed in file paths
-	//  * Truncating names that are too long for zip files
-	//  * Adding collision deduplicating numbers for jobs with the same name
-	//
-	// We are hesitant to duplicate all the server logic due to the fragility but while we explore our options, it
-	// is sensible to fix the issue that is unavoidable for users, that when a job uses a composite action, the server
-	// constructs a job name by constructing a job name of `<JOB_NAME`> / <ACTION_NAME>`. This means that logs will
-	// never be found for jobs that use composite actions.
-	sanitizedJobName := strings.ReplaceAll(job.Name, "/", "")
-	re := fmt.Sprintf(`^%s\/%d_.*\.txt`, regexp.QuoteMeta(sanitizedJobName), step.Number)
-	return regexp.MustCompile(re)
-}
-
-// This function takes a zip file of logs and a list of jobs.
-// Structure of zip file
-//
-//	zip/
-//	├── jobname1/
-//	│   ├── 1_stepname.txt
-//	│   ├── 2_anotherstepname.txt
-//	│   ├── 3_stepstepname.txt
-//	│   └── 4_laststepname.txt
-//	└── jobname2/
-//	    ├── 1_stepname.txt
-//	    └── 2_somestepname.txt
-//
-// It iterates through the list of jobs and tries to find the matching
-// log in the zip file. If the matching log is found it is attached
-// to the job.
-func attachRunLog(rlz *zip.Reader, jobs []shared.Job) {
-	for i, job := range jobs {
-		for j, step := range job.Steps {
-			re := logFilenameRegexp(job, step)
-			for _, file := range rlz.File {
-				if re.MatchString(file.Name) {
-					jobs[i].Steps[j].Log = file
-					break
-				}
-			}
+func displayLogSegments(w io.Writer, segments []logSegment) error {
+	for _, segment := range segments {
+		stepName := "UNKNOWN STEP"
+		if segment.step != nil {
+			stepName = segment.step.Name
 		}
-	}
-}
 
-func displayRunLog(w io.Writer, jobs []shared.Job, failed bool) error {
-	for _, job := range jobs {
-		steps := job.Steps
-		sort.Sort(steps)
-		for _, step := range steps {
-			if failed && !shared.IsFailureState(step.Conclusion) {
-				continue
-			}
-			if step.Log == nil {
-				continue
-			}
-			prefix := fmt.Sprintf("%s\t%s\t", job.Name, step.Name)
-			f, err := step.Log.Open()
-			if err != nil {
+		rc, err := segment.fetcher.GetLog()
+		if err != nil {
+			return err
+		}
+
+		err = func() error {
+			defer rc.Close()
+			prefix := fmt.Sprintf("%s\t%s\t", segment.job.Name, stepName)
+			if err := copyLogWithLinePrefix(w, rc, prefix); err != nil {
 				return err
 			}
-			scanner := bufio.NewScanner(f)
-			for scanner.Scan() {
-				fmt.Fprintf(w, "%s%s\n", prefix, scanner.Text())
-			}
-			f.Close()
+			return nil
+		}()
+
+		if err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+func copyLogWithLinePrefix(w io.Writer, r io.Reader, prefix string) error {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		fmt.Fprintf(w, "%s%s\n", prefix, scanner.Text())
+	}
 	return nil
 }

@@ -3,8 +3,10 @@ package shared
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -18,10 +20,12 @@ import (
 )
 
 type GistFile struct {
-	Filename string `json:"filename,omitempty"`
-	Type     string `json:"type,omitempty"`
-	Language string `json:"language,omitempty"`
-	Content  string `json:"content"`
+	Filename  string `json:"filename,omitempty"`
+	Type      string `json:"type,omitempty"`
+	Language  string `json:"language,omitempty"`
+	Content   string `json:"content"`
+	RawURL    string `json:"raw_url,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 type GistOwner struct {
@@ -36,6 +40,22 @@ type Gist struct {
 	Public      bool                 `json:"public"`
 	HTMLURL     string               `json:"html_url,omitempty"`
 	Owner       *GistOwner           `json:"owner,omitempty"`
+}
+
+func (g Gist) Filename() string {
+	filenames := make([]string, 0, len(g.Files))
+	for fn := range g.Files {
+		filenames = append(filenames, fn)
+	}
+	if len(filenames) == 0 {
+		return ""
+	}
+	sort.Strings(filenames)
+	return filenames[0]
+}
+
+func (g Gist) TruncDescription() string {
+	return text.Truncate(100, text.RemoveExcessiveWhitespace(g.Description))
 }
 
 var NotFoundErr = errors.New("not found")
@@ -74,7 +94,9 @@ func GistIDFromURL(gistURL string) (string, error) {
 	return "", fmt.Errorf("Invalid gist URL %s", u)
 }
 
-func ListGists(client *http.Client, hostname string, limit int, visibility string) ([]Gist, error) {
+const maxPerPage = 100
+
+func ListGists(client *http.Client, hostname string, limit int, filter *regexp.Regexp, includeContent bool, visibility string) ([]Gist, error) {
 	type response struct {
 		Viewer struct {
 			Gists struct {
@@ -82,6 +104,7 @@ func ListGists(client *http.Client, hostname string, limit int, visibility strin
 					Description string
 					Files       []struct {
 						Name string
+						Text string `graphql:"text @include(if: $includeContent)"`
 					}
 					IsPublic  bool
 					Name      string
@@ -96,14 +119,33 @@ func ListGists(client *http.Client, hostname string, limit int, visibility strin
 	}
 
 	perPage := limit
-	if perPage > 100 {
-		perPage = 100
+	if perPage > maxPerPage {
+		perPage = maxPerPage
 	}
 
 	variables := map[string]interface{}{
-		"per_page":   githubv4.Int(perPage),
-		"endCursor":  (*githubv4.String)(nil),
-		"visibility": githubv4.GistPrivacy(strings.ToUpper(visibility)),
+		"per_page":       githubv4.Int(perPage),
+		"endCursor":      (*githubv4.String)(nil),
+		"visibility":     githubv4.GistPrivacy(strings.ToUpper(visibility)),
+		"includeContent": githubv4.Boolean(includeContent),
+	}
+
+	filterFunc := func(gist *Gist) bool {
+		if filter.MatchString(gist.Description) {
+			return true
+		}
+
+		for _, file := range gist.Files {
+			if filter.MatchString(file.Filename) {
+				return true
+			}
+
+			if includeContent && filter.MatchString(file.Content) {
+				return true
+			}
+		}
+
+		return false
 	}
 
 	gql := api.NewClientFromHTTP(client)
@@ -122,19 +164,22 @@ pagination:
 			for _, file := range gist.Files {
 				files[file.Name] = &GistFile{
 					Filename: file.Name,
+					Content:  file.Text,
 				}
 			}
 
-			gists = append(
-				gists,
-				Gist{
-					ID:          gist.Name,
-					Description: gist.Description,
-					Files:       files,
-					UpdatedAt:   gist.UpdatedAt,
-					Public:      gist.IsPublic,
-				},
-			)
+			gist := Gist{
+				ID:          gist.Name,
+				Description: gist.Description,
+				Files:       files,
+				UpdatedAt:   gist.UpdatedAt,
+				Public:      gist.IsPublic,
+			}
+
+			if filter == nil || filterFunc(&gist) {
+				gists = append(gists, gist)
+			}
+
 			if len(gists) == limit {
 				break pagination
 			}
@@ -176,47 +221,55 @@ func IsBinaryContents(contents []byte) bool {
 	return isBinary
 }
 
-func PromptGists(prompter prompter.Prompter, client *http.Client, host string, cs *iostreams.ColorScheme) (gistID string, err error) {
-	gists, err := ListGists(client, host, 10, "all")
+func PromptGists(prompter prompter.Prompter, client *http.Client, host string, cs *iostreams.ColorScheme) (gist *Gist, err error) {
+	gists, err := ListGists(client, host, 10, nil, false, "all")
 	if err != nil {
-		return "", err
+		return &Gist{}, err
 	}
 
 	if len(gists) == 0 {
-		return "", nil
+		return &Gist{}, nil
 	}
 
-	var opts []string
-	var gistIDs = make([]string, len(gists))
+	var opts = make([]string, len(gists))
 
 	for i, gist := range gists {
-		gistIDs[i] = gist.ID
-		description := ""
-		gistName := ""
-
-		if gist.Description != "" {
-			description = gist.Description
-		}
-
-		filenames := make([]string, 0, len(gist.Files))
-		for fn := range gist.Files {
-			filenames = append(filenames, fn)
-		}
-		sort.Strings(filenames)
-		gistName = filenames[0]
-
 		gistTime := text.FuzzyAgo(time.Now(), gist.UpdatedAt)
 		// TODO: support dynamic maxWidth
-		description = text.Truncate(100, text.RemoveExcessiveWhitespace(description))
-		opt := fmt.Sprintf("%s %s %s", cs.Bold(gistName), description, cs.Gray(gistTime))
-		opts = append(opts, opt)
+		opts[i] = fmt.Sprintf("%s %s %s", cs.Bold(gist.Filename()), gist.TruncDescription(), cs.Muted(gistTime))
 	}
 
 	result, err := prompter.Select("Select a gist", "", opts)
 
 	if err != nil {
+		return &Gist{}, err
+	}
+
+	return &gists[result], nil
+}
+
+func GetRawGistFile(httpClient *http.Client, rawURL string) (string, error) {
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
 		return "", err
 	}
 
-	return gistIDs[result], nil
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", api.HandleHTTPError(resp)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
 }

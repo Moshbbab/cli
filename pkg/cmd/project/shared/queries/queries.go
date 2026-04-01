@@ -7,9 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 
-	"github.com/briandowns/spinner"
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/pkg/iostreams"
@@ -24,8 +22,8 @@ func NewClient(httpClient *http.Client, hostname string, ios *iostreams.IOStream
 	}
 	return &Client{
 		apiClient: apiClient,
-		spinner:   ios.IsStdoutTTY() && ios.IsStderrTTY(),
-		prompter:  prompter.New("", ios.In, ios.Out, ios.ErrOut),
+		io:        ios,
+		prompter:  prompter.New("", ios),
 	}
 }
 
@@ -44,9 +42,10 @@ func NewTestClient(opts ...TestClientOpt) *Client {
 		hostname: "github.com",
 		Client:   api.NewClientFromHTTP(http.DefaultClient),
 	}
+	io, _, _, _ := iostreams.Test()
 	c := &Client{
 		apiClient: apiClient,
-		spinner:   false,
+		io:        io,
 		prompter:  nil,
 	}
 
@@ -80,7 +79,7 @@ type graphqlClient interface {
 
 type Client struct {
 	apiClient graphqlClient
-	spinner   bool
+	io        *iostreams.IOStreams
 	prompter  iprompter
 }
 
@@ -89,25 +88,23 @@ const (
 	LimitMax     = 100 // https://docs.github.com/en/graphql/overview/resource-limitations#node-limit
 )
 
-// doQuery wraps API calls with a visual spinner
-func (c *Client) doQuery(name string, query interface{}, variables map[string]interface{}) error {
-	var sp *spinner.Spinner
-	if c.spinner {
-		// https://github.com/briandowns/spinner#available-character-sets
-		dotStyle := spinner.CharSets[11]
-		sp = spinner.New(dotStyle, 120*time.Millisecond, spinner.WithColor("fgCyan"))
-		sp.Start()
-	}
+// doQueryWithProgressIndicator wraps API calls with a progress indicator.
+// The query name is used in the progress indicator label.
+func (c *Client) doQueryWithProgressIndicator(name string, query interface{}, variables map[string]interface{}) error {
+	c.io.StartProgressIndicatorWithLabel(fmt.Sprintf("Fetching %s", name))
+	defer c.io.StopProgressIndicator()
 	err := c.apiClient.Query(name, query, variables)
-	if sp != nil {
-		sp.Stop()
-	}
 	return handleError(err)
 }
 
 // TODO: un-export this since it couples the caller heavily to api.GraphQLClient
 func (c *Client) Mutate(operationName string, query interface{}, variables map[string]interface{}) error {
 	err := c.apiClient.Mutate(operationName, query, variables)
+	return handleError(err)
+}
+
+func (c *Client) Query(operationName string, query interface{}, variables map[string]interface{}) error {
+	err := c.apiClient.Query(operationName, query, variables)
 	return handleError(err)
 }
 
@@ -142,7 +139,7 @@ type Project struct {
 		PageInfo   PageInfo
 		TotalCount int
 		Nodes      []ProjectItem
-	} `graphql:"items(first: $firstItems, after: $afterItems)"`
+	} `graphql:"items(first: $firstItems, after: $afterItems, query: $query)"`
 	Fields ProjectFields `graphql:"fields(first: $firstFields, after: $afterFields)"`
 	Owner  struct {
 		TypeName string `graphql:"__typename"`
@@ -153,6 +150,111 @@ type Project struct {
 			Login string
 		} `graphql:"... on Organization"`
 	}
+}
+
+// ProjectMutationQuery is a ProjectV2 response shape for mutation payloads.
+// It intentionally avoids the queryable items connection to prevent requiring a $query variable.
+type ProjectMutationQuery struct {
+	Number           int32
+	URL              string
+	ShortDescription string
+	Public           bool
+	Closed           bool
+	Title            string
+	ID               string
+	Readme           string
+	Items            struct {
+		TotalCount int
+	} `graphql:"items(first: $firstItems, after: $afterItems)"`
+	Fields struct {
+		TotalCount int
+	} `graphql:"fields(first: $firstFields, after: $afterFields)"`
+	Owner struct {
+		TypeName string `graphql:"__typename"`
+		User     struct {
+			Login string
+		} `graphql:"... on User"`
+		Organization struct {
+			Login string
+		} `graphql:"... on Organization"`
+	}
+}
+
+// Below, you will find the query structs to represent fetching a project via the GraphQL API.
+// Prior to GHES 3.20, the query argument did not exist on the items connection, so we have
+// one base struct and two structs that embed and add the Items connection with and without the query argument.
+// The expectation is that these will then be converted into the Project domain struct above.
+type projectQueryBase struct {
+	Number           int32
+	URL              string
+	ShortDescription string
+	Public           bool
+	Closed           bool
+	Title            string
+	ID               string
+	Readme           string
+	Owner            struct {
+		TypeName string `graphql:"__typename"`
+		User     struct {
+			Login string
+		} `graphql:"... on User"`
+		Organization struct {
+			Login string
+		} `graphql:"... on Organization"`
+	}
+	Fields ProjectFields `graphql:"fields(first: $firstFields, after: $afterFields)"`
+}
+
+type projectQueryWithQueryableItems struct {
+	projectQueryBase
+	Items struct {
+		PageInfo   PageInfo
+		TotalCount int
+		Nodes      []ProjectItem
+	} `graphql:"items(first: $firstItems, after: $afterItems, query: $query)"`
+}
+
+type projectQueryWithoutQueryableItems struct {
+	projectQueryBase
+	Items struct {
+		PageInfo   PageInfo
+		TotalCount int
+		Nodes      []ProjectItem
+	} `graphql:"items(first: $firstItems, after: $afterItems)"`
+}
+
+func newProjectFromQueryBase(source projectQueryBase) *Project {
+	project := &Project{
+		Number:           source.Number,
+		URL:              source.URL,
+		ShortDescription: source.ShortDescription,
+		Public:           source.Public,
+		Closed:           source.Closed,
+		Title:            source.Title,
+		ID:               source.ID,
+		Readme:           source.Readme,
+	}
+	project.Owner.TypeName = source.Owner.TypeName
+	project.Owner.User.Login = source.Owner.User.Login
+	project.Owner.Organization.Login = source.Owner.Organization.Login
+	project.Fields = source.Fields
+	return project
+}
+
+func newProjectFromQueryWithItemsQuery(source projectQueryWithQueryableItems) *Project {
+	project := newProjectFromQueryBase(source.projectQueryBase)
+	project.Items.PageInfo = source.Items.PageInfo
+	project.Items.TotalCount = source.Items.TotalCount
+	project.Items.Nodes = source.Items.Nodes
+	return project
+}
+
+func newProjectFromQueryWithoutItemsQuery(source projectQueryWithoutQueryableItems) *Project {
+	project := newProjectFromQueryBase(source.projectQueryBase)
+	project.Items.PageInfo = source.Items.PageInfo
+	project.Items.TotalCount = source.Items.TotalCount
+	project.Items.Nodes = source.Items.Nodes
+	return project
 }
 
 func (p Project) DetailedItems() map[string]interface{} {
@@ -190,6 +292,40 @@ func (p Project) OwnerType() string {
 }
 
 func (p Project) OwnerLogin() string {
+	if p.OwnerType() == "User" {
+		return p.Owner.User.Login
+	}
+	return p.Owner.Organization.Login
+}
+
+func (p ProjectMutationQuery) ExportData(_ []string) map[string]interface{} {
+	return map[string]interface{}{
+		"number":           p.Number,
+		"url":              p.URL,
+		"shortDescription": p.ShortDescription,
+		"public":           p.Public,
+		"closed":           p.Closed,
+		"title":            p.Title,
+		"id":               p.ID,
+		"readme":           p.Readme,
+		"items": map[string]interface{}{
+			"totalCount": p.Items.TotalCount,
+		},
+		"fields": map[string]interface{}{
+			"totalCount": p.Fields.TotalCount,
+		},
+		"owner": map[string]interface{}{
+			"type":  p.OwnerType(),
+			"login": p.OwnerLogin(),
+		},
+	}
+}
+
+func (p ProjectMutationQuery) OwnerType() string {
+	return p.Owner.TypeName
+}
+
+func (p ProjectMutationQuery) OwnerLogin() string {
 	if p.OwnerType() == "User" {
 		return p.Owner.User.Login
 	}
@@ -235,10 +371,11 @@ type FieldValueNodes struct {
 		Field ProjectField
 	} `graphql:"... on ProjectV2ItemFieldDateValue"`
 	ProjectV2ItemFieldIterationValue struct {
-		Title     string
-		StartDate string
-		Duration  int
-		Field     ProjectField
+		Title       string
+		StartDate   string
+		Duration    int
+		Field       ProjectField
+		IterationId string
 	} `graphql:"... on ProjectV2ItemFieldIterationValue"`
 	ProjectV2ItemFieldLabelValue struct {
 		Labels struct {
@@ -249,7 +386,7 @@ type FieldValueNodes struct {
 		Field ProjectField
 	} `graphql:"... on ProjectV2ItemFieldLabelValue"`
 	ProjectV2ItemFieldNumberValue struct {
-		Number float32
+		Number float64
 		Field  ProjectField
 	} `graphql:"... on ProjectV2ItemFieldNumberValue"`
 	ProjectV2ItemFieldSingleSelectValue struct {
@@ -515,8 +652,10 @@ func (p ProjectItem) ExportData(_ []string) map[string]interface{} {
 }
 
 // ProjectItems returns the items of a project. If the OwnerType is VIEWER, no login is required.
-// If limit is 0, the default limit is used.
-func (c *Client) ProjectItems(o *Owner, number int32, limit int) (*Project, error) {
+// If limit is 0, the default limit is used. The queryStr parameter is passed as a server-side
+// filter to the items connection, using the same syntax as the GitHub Projects filter bar
+// (e.g. "assignee:octocat", "status:done").
+func (c *Client) ProjectItems(o *Owner, number int32, limit int, queryStr string) (*Project, error) {
 	project := &Project{}
 	if limit == 0 {
 		limit = LimitDefault
@@ -535,23 +674,38 @@ func (c *Client) ProjectItems(o *Owner, number int32, limit int) (*Project, erro
 		"afterFields": (*githubv4.String)(nil),
 		"number":      githubv4.Int(number),
 	}
+	if queryStr != "" {
+		variables["query"] = githubv4.String(queryStr)
+	}
 
 	var query pager[ProjectItem]
 	var queryName string
 	switch o.Type {
 	case UserOwner:
 		variables["login"] = githubv4.String(o.Login)
-		query = &userOwnerWithItems{} // must be a pointer to work with graphql queries
+		if queryStr == "" {
+			query = &userOwnerWithItemsNoQuery{}
+		} else {
+			query = &userOwnerWithItems{}
+		}
 		queryName = "UserProjectWithItems"
 	case OrgOwner:
 		variables["login"] = githubv4.String(o.Login)
-		query = &orgOwnerWithItems{} // must be a pointer to work with graphql queries
+		if queryStr == "" {
+			query = &orgOwnerWithItemsNoQuery{}
+		} else {
+			query = &orgOwnerWithItems{}
+		}
 		queryName = "OrgProjectWithItems"
 	case ViewerOwner:
-		query = &viewerOwnerWithItems{} // must be a pointer to work with graphql queries
+		if queryStr == "" {
+			query = &viewerOwnerWithItemsNoQuery{}
+		} else {
+			query = &viewerOwnerWithItems{}
+		}
 		queryName = "ViewerProjectWithItems"
 	}
-	err := c.doQuery(queryName, query, variables)
+	err := c.doQueryWithProgressIndicator(queryName, query, variables)
 	if err != nil {
 		return project, err
 	}
@@ -574,6 +728,23 @@ type pager[N projectAttribute] interface {
 	Project() *Project
 }
 
+// userOwnerWithItemsNoQuery
+func (q userOwnerWithItemsNoQuery) HasNextPage() bool {
+	return q.Owner.Project.Items.PageInfo.HasNextPage
+}
+
+func (q userOwnerWithItemsNoQuery) EndCursor() string {
+	return string(q.Owner.Project.Items.PageInfo.EndCursor)
+}
+
+func (q userOwnerWithItemsNoQuery) Nodes() []ProjectItem {
+	return q.Owner.Project.Items.Nodes
+}
+
+func (q userOwnerWithItemsNoQuery) Project() *Project {
+	return newProjectFromQueryWithoutItemsQuery(q.Owner.Project)
+}
+
 // userOwnerWithItems
 func (q userOwnerWithItems) HasNextPage() bool {
 	return q.Owner.Project.Items.PageInfo.HasNextPage
@@ -588,7 +759,7 @@ func (q userOwnerWithItems) Nodes() []ProjectItem {
 }
 
 func (q userOwnerWithItems) Project() *Project {
-	return &q.Owner.Project
+	return newProjectFromQueryWithItemsQuery(q.Owner.Project)
 }
 
 // orgOwnerWithItems
@@ -605,7 +776,24 @@ func (q orgOwnerWithItems) Nodes() []ProjectItem {
 }
 
 func (q orgOwnerWithItems) Project() *Project {
-	return &q.Owner.Project
+	return newProjectFromQueryWithItemsQuery(q.Owner.Project)
+}
+
+// orgOwnerWithItemsNoQuery
+func (q orgOwnerWithItemsNoQuery) HasNextPage() bool {
+	return q.Owner.Project.Items.PageInfo.HasNextPage
+}
+
+func (q orgOwnerWithItemsNoQuery) EndCursor() string {
+	return string(q.Owner.Project.Items.PageInfo.EndCursor)
+}
+
+func (q orgOwnerWithItemsNoQuery) Nodes() []ProjectItem {
+	return q.Owner.Project.Items.Nodes
+}
+
+func (q orgOwnerWithItemsNoQuery) Project() *Project {
+	return newProjectFromQueryWithoutItemsQuery(q.Owner.Project)
 }
 
 // viewerOwnerWithItems
@@ -622,7 +810,24 @@ func (q viewerOwnerWithItems) Nodes() []ProjectItem {
 }
 
 func (q viewerOwnerWithItems) Project() *Project {
-	return &q.Owner.Project
+	return newProjectFromQueryWithItemsQuery(q.Owner.Project)
+}
+
+// viewerOwnerWithItemsNoQuery
+func (q viewerOwnerWithItemsNoQuery) HasNextPage() bool {
+	return q.Owner.Project.Items.PageInfo.HasNextPage
+}
+
+func (q viewerOwnerWithItemsNoQuery) EndCursor() string {
+	return string(q.Owner.Project.Items.PageInfo.EndCursor)
+}
+
+func (q viewerOwnerWithItemsNoQuery) Nodes() []ProjectItem {
+	return q.Owner.Project.Items.Nodes
+}
+
+func (q viewerOwnerWithItemsNoQuery) Project() *Project {
+	return newProjectFromQueryWithoutItemsQuery(q.Owner.Project)
 }
 
 // userOwnerWithFields
@@ -639,7 +844,7 @@ func (q userOwnerWithFields) Nodes() []ProjectField {
 }
 
 func (q userOwnerWithFields) Project() *Project {
-	return &q.Owner.Project
+	return newProjectFromQueryWithoutItemsQuery(q.Owner.Project)
 }
 
 // orgOwnerWithFields
@@ -656,7 +861,7 @@ func (q orgOwnerWithFields) Nodes() []ProjectField {
 }
 
 func (q orgOwnerWithFields) Project() *Project {
-	return &q.Owner.Project
+	return newProjectFromQueryWithoutItemsQuery(q.Owner.Project)
 }
 
 // viewerOwnerWithFields
@@ -673,7 +878,7 @@ func (q viewerOwnerWithFields) Nodes() []ProjectField {
 }
 
 func (q viewerOwnerWithFields) Project() *Project {
-	return &q.Owner.Project
+	return newProjectFromQueryWithoutItemsQuery(q.Owner.Project)
 }
 
 type projectAttribute interface {
@@ -705,7 +910,7 @@ func paginateAttributes[N projectAttribute](c *Client, p pager[N], variables map
 
 		// set the cursor to the end of the last page
 		variables[afterKey] = (*githubv4.String)(&cursor)
-		err := c.doQuery(queryName, p, variables)
+		err := c.doQueryWithProgressIndicator(queryName, p, variables)
 		if err != nil {
 			return nodes, err
 		}
@@ -852,17 +1057,17 @@ func (c *Client) ProjectFields(o *Owner, number int32, limit int) (*Project, err
 	switch o.Type {
 	case UserOwner:
 		variables["login"] = githubv4.String(o.Login)
-		query = &userOwnerWithFields{} // must be a pointer to work with graphql queries
+		query = &userOwnerWithFields{}
 		queryName = "UserProjectWithFields"
 	case OrgOwner:
 		variables["login"] = githubv4.String(o.Login)
-		query = &orgOwnerWithFields{} // must be a pointer to work with graphql queries
+		query = &orgOwnerWithFields{}
 		queryName = "OrgProjectWithFields"
 	case ViewerOwner:
-		query = &viewerOwnerWithFields{} // must be a pointer to work with graphql queries
+		query = &viewerOwnerWithFields{}
 		queryName = "ViewerProjectWithFields"
 	}
-	err := c.doQuery(queryName, query, variables)
+	err := c.doQueryWithProgressIndicator(queryName, query, variables)
 	if err != nil {
 		return project, err
 	}
@@ -900,70 +1105,77 @@ type viewerLoginOrgs struct {
 	}
 }
 
+type ownerWithLogin struct {
+	Project projectQueryWithoutQueryableItems `graphql:"projectV2(number: $number)"`
+	Login   string
+}
+
+type ownerWithProjectWithItemQuery struct {
+	Project projectQueryWithQueryableItems `graphql:"projectV2(number: $number)"`
+}
+
+type ownerWithProjectWithoutItemQuery struct {
+	Project projectQueryWithoutQueryableItems `graphql:"projectV2(number: $number)"`
+}
+
 // userOwner is used to query the project of a user.
 type userOwner struct {
-	Owner struct {
-		Project Project `graphql:"projectV2(number: $number)"`
-		Login   string
-	} `graphql:"user(login: $login)"`
+	Owner ownerWithLogin `graphql:"user(login: $login)"`
 }
 
 // userOwnerWithItems is used to query the project of a user with its items.
 type userOwnerWithItems struct {
-	Owner struct {
-		Project Project `graphql:"projectV2(number: $number)"`
-	} `graphql:"user(login: $login)"`
+	Owner ownerWithProjectWithItemQuery `graphql:"user(login: $login)"`
+}
+
+// userOwnerWithItemsNoQuery is used to query the project of a user with its items, without query support.
+type userOwnerWithItemsNoQuery struct {
+	Owner ownerWithProjectWithoutItemQuery `graphql:"user(login: $login)"`
 }
 
 // userOwnerWithFields is used to query the project of a user with its fields.
 type userOwnerWithFields struct {
-	Owner struct {
-		Project Project `graphql:"projectV2(number: $number)"`
-	} `graphql:"user(login: $login)"`
+	Owner ownerWithProjectWithoutItemQuery `graphql:"user(login: $login)"`
 }
 
 // orgOwner is used to query the project of an organization.
 type orgOwner struct {
-	Owner struct {
-		Project Project `graphql:"projectV2(number: $number)"`
-		Login   string
-	} `graphql:"organization(login: $login)"`
+	Owner ownerWithLogin `graphql:"organization(login: $login)"`
 }
 
 // orgOwnerWithItems is used to query the project of an organization with its items.
 type orgOwnerWithItems struct {
-	Owner struct {
-		Project Project `graphql:"projectV2(number: $number)"`
-	} `graphql:"organization(login: $login)"`
+	Owner ownerWithProjectWithItemQuery `graphql:"organization(login: $login)"`
+}
+
+// orgOwnerWithItemsNoQuery is used to query the project of an organization with its items, without query support.
+type orgOwnerWithItemsNoQuery struct {
+	Owner ownerWithProjectWithoutItemQuery `graphql:"organization(login: $login)"`
 }
 
 // orgOwnerWithFields is used to query the project of an organization with its fields.
 type orgOwnerWithFields struct {
-	Owner struct {
-		Project Project `graphql:"projectV2(number: $number)"`
-	} `graphql:"organization(login: $login)"`
+	Owner ownerWithProjectWithoutItemQuery `graphql:"organization(login: $login)"`
 }
 
 // viewerOwner is used to query the project of the viewer.
 type viewerOwner struct {
-	Owner struct {
-		Project Project `graphql:"projectV2(number: $number)"`
-		Login   string
-	} `graphql:"viewer"`
+	Owner ownerWithLogin `graphql:"viewer"`
 }
 
 // viewerOwnerWithItems is used to query the project of the viewer with its items.
 type viewerOwnerWithItems struct {
-	Owner struct {
-		Project Project `graphql:"projectV2(number: $number)"`
-	} `graphql:"viewer"`
+	Owner ownerWithProjectWithItemQuery `graphql:"viewer"`
+}
+
+// viewerOwnerWithItemsNoQuery is used to query the project of the viewer with its items, without query support.
+type viewerOwnerWithItemsNoQuery struct {
+	Owner ownerWithProjectWithoutItemQuery `graphql:"viewer"`
 }
 
 // viewerOwnerWithFields is used to query the project of the viewer with its fields.
 type viewerOwnerWithFields struct {
-	Owner struct {
-		Project Project `graphql:"projectV2(number: $number)"`
-	} `graphql:"viewer"`
+	Owner ownerWithProjectWithoutItemQuery `graphql:"viewer"`
 }
 
 // OwnerType is the type of the owner of a project, which can be either a user or an organization. Viewer is the current user.
@@ -976,7 +1188,7 @@ const ViewerOwner OwnerType = "VIEWER"
 // ViewerLoginName returns the login name of the viewer.
 func (c *Client) ViewerLoginName() (string, error) {
 	var query viewerLogin
-	err := c.doQuery("Viewer", &query, map[string]interface{}{})
+	err := c.doQueryWithProgressIndicator("Viewer", &query, map[string]interface{}{})
 	if err != nil {
 		return "", err
 	}
@@ -987,7 +1199,7 @@ func (c *Client) ViewerLoginName() (string, error) {
 func (c *Client) OwnerIDAndType(login string) (string, OwnerType, error) {
 	if login == "@me" || login == "" {
 		var query viewerLogin
-		err := c.doQuery("ViewerOwner", &query, nil)
+		err := c.doQueryWithProgressIndicator("ViewerOwner", &query, nil)
 		if err != nil {
 			return "", "", err
 		}
@@ -1008,7 +1220,7 @@ func (c *Client) OwnerIDAndType(login string) (string, OwnerType, error) {
 		} `graphql:"organization(login: $login)"`
 	}
 
-	err := c.doQuery("UserOrgOwner", &query, variables)
+	err := c.doQueryWithProgressIndicator("UserOrgOwner", &query, variables)
 	if err != nil {
 		// Due to the way the queries are structured, we don't know if a login belongs to a user
 		// or to an org, even though they are unique. To deal with this, we try both - if neither
@@ -1051,7 +1263,7 @@ func (c *Client) IssueOrPullRequestID(rawURL string) (string, error) {
 		"url": githubv4.URI{URL: uri},
 	}
 	var query issueOrPullRequest
-	err = c.doQuery("GetIssueOrPullRequest", &query, variables)
+	err = c.doQueryWithProgressIndicator("GetIssueOrPullRequest", &query, variables)
 	if err != nil {
 		return "", err
 	}
@@ -1069,7 +1281,7 @@ type userProjects struct {
 		Projects struct {
 			TotalCount int
 			PageInfo   PageInfo
-			Nodes      []Project
+			Nodes      []projectQueryWithoutQueryableItems
 		} `graphql:"projectsV2(first: $first, after: $after)"`
 		Login string
 	} `graphql:"user(login: $login)"`
@@ -1081,7 +1293,7 @@ type orgProjects struct {
 		Projects struct {
 			TotalCount int
 			PageInfo   PageInfo
-			Nodes      []Project
+			Nodes      []projectQueryWithoutQueryableItems
 		} `graphql:"projectsV2(first: $first, after: $after)"`
 		Login string
 	} `graphql:"organization(login: $login)"`
@@ -1093,7 +1305,7 @@ type viewerProjects struct {
 		Projects struct {
 			TotalCount int
 			PageInfo   PageInfo
-			Nodes      []Project
+			Nodes      []projectQueryWithoutQueryableItems
 		} `graphql:"projectsV2(first: $first, after: $after)"`
 		Login string
 	} `graphql:"viewer"`
@@ -1113,7 +1325,7 @@ func (c *Client) userOrgLogins() ([]loginTypes, error) {
 		"after": (*githubv4.String)(nil),
 	}
 
-	err := c.doQuery("ViewerLoginAndOrgs", &v, variables)
+	err := c.doQueryWithProgressIndicator("ViewerLoginAndOrgs", &v, variables)
 	if err != nil {
 		return l, err
 	}
@@ -1151,7 +1363,7 @@ func (c *Client) paginateOrgLogins(l []loginTypes, cursor string) ([]loginTypes,
 		"after": githubv4.String(cursor),
 	}
 
-	err := c.doQuery("ViewerLoginAndOrgs", &v, variables)
+	err := c.doQueryWithProgressIndicator("ViewerLoginAndOrgs", &v, variables)
 	if err != nil {
 		return l, err
 	}
@@ -1246,17 +1458,17 @@ func (c *Client) NewProject(canPrompt bool, o *Owner, number int32, fields bool)
 		if o.Type == UserOwner {
 			var query userOwner
 			variables["login"] = githubv4.String(o.Login)
-			err := c.doQuery("UserProject", &query, variables)
-			return &query.Owner.Project, err
+			err := c.doQueryWithProgressIndicator("UserProject", &query, variables)
+			return newProjectFromQueryWithoutItemsQuery(query.Owner.Project), err
 		} else if o.Type == OrgOwner {
 			variables["login"] = githubv4.String(o.Login)
 			var query orgOwner
-			err := c.doQuery("OrgProject", &query, variables)
-			return &query.Owner.Project, err
+			err := c.doQueryWithProgressIndicator("OrgProject", &query, variables)
+			return newProjectFromQueryWithoutItemsQuery(query.Owner.Project), err
 		} else if o.Type == ViewerOwner {
 			var query viewerOwner
-			err := c.doQuery("ViewerProject", &query, variables)
-			return &query.Owner.Project, err
+			err := c.doQueryWithProgressIndicator("ViewerProject", &query, variables)
+			return newProjectFromQueryWithoutItemsQuery(query.Owner.Project), err
 		}
 		return nil, errors.New("unknown owner type")
 	}
@@ -1330,28 +1542,34 @@ func (c *Client) Projects(login string, t OwnerType, limit int, fields bool) (Pr
 		// the cost.
 		if t == UserOwner {
 			var query userProjects
-			if err := c.doQuery("UserProjects", &query, variables); err != nil {
+			if err := c.doQueryWithProgressIndicator("UserProjects", &query, variables); err != nil {
 				return projects, err
 			}
-			projects.Nodes = append(projects.Nodes, query.Owner.Projects.Nodes...)
+			for _, p := range query.Owner.Projects.Nodes {
+				projects.Nodes = append(projects.Nodes, *newProjectFromQueryWithoutItemsQuery(p))
+			}
 			hasNextPage = query.Owner.Projects.PageInfo.HasNextPage
 			cursor = &query.Owner.Projects.PageInfo.EndCursor
 			projects.TotalCount = query.Owner.Projects.TotalCount
 		} else if t == OrgOwner {
 			var query orgProjects
-			if err := c.doQuery("OrgProjects", &query, variables); err != nil {
+			if err := c.doQueryWithProgressIndicator("OrgProjects", &query, variables); err != nil {
 				return projects, err
 			}
-			projects.Nodes = append(projects.Nodes, query.Owner.Projects.Nodes...)
+			for _, p := range query.Owner.Projects.Nodes {
+				projects.Nodes = append(projects.Nodes, *newProjectFromQueryWithoutItemsQuery(p))
+			}
 			hasNextPage = query.Owner.Projects.PageInfo.HasNextPage
 			cursor = &query.Owner.Projects.PageInfo.EndCursor
 			projects.TotalCount = query.Owner.Projects.TotalCount
 		} else if t == ViewerOwner {
 			var query viewerProjects
-			if err := c.doQuery("ViewerProjects", &query, variables); err != nil {
+			if err := c.doQueryWithProgressIndicator("ViewerProjects", &query, variables); err != nil {
 				return projects, err
 			}
-			projects.Nodes = append(projects.Nodes, query.Owner.Projects.Nodes...)
+			for _, p := range query.Owner.Projects.Nodes {
+				projects.Nodes = append(projects.Nodes, *newProjectFromQueryWithoutItemsQuery(p))
+			}
 			hasNextPage = query.Owner.Projects.PageInfo.HasNextPage
 			cursor = &query.Owner.Projects.PageInfo.EndCursor
 			projects.TotalCount = query.Owner.Projects.TotalCount
@@ -1488,9 +1706,10 @@ func projectFieldValueData(v FieldValueNodes) interface{} {
 		return v.ProjectV2ItemFieldDateValue.Date
 	case "ProjectV2ItemFieldIterationValue":
 		return map[string]interface{}{
-			"title":     v.ProjectV2ItemFieldIterationValue.Title,
-			"startDate": v.ProjectV2ItemFieldIterationValue.StartDate,
-			"duration":  v.ProjectV2ItemFieldIterationValue.Duration,
+			"title":       v.ProjectV2ItemFieldIterationValue.Title,
+			"startDate":   v.ProjectV2ItemFieldIterationValue.StartDate,
+			"duration":    v.ProjectV2ItemFieldIterationValue.Duration,
+			"iterationId": v.ProjectV2ItemFieldIterationValue.IterationId,
 		}
 	case "ProjectV2ItemFieldNumberValue":
 		return v.ProjectV2ItemFieldNumberValue.Number

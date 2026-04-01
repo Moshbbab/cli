@@ -10,8 +10,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/internal/config"
 	fd "github.com/cli/cli/v2/internal/featuredetection"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/tableprinter"
 	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -20,7 +20,7 @@ import (
 
 type ListOptions struct {
 	HttpClient func() (*http.Client, error)
-	Config     func() (config.Config, error)
+	Config     func() (gh.Config, error)
 	IO         *iostreams.IOStreams
 	Exporter   cmdutil.Exporter
 	Detector   fd.Detector
@@ -139,6 +139,7 @@ func listRun(opts *ListOptions) error {
 	}
 
 	fields := defaultFields
+	// TODO repoFeaturesCleanup
 	if features.VisibilityField {
 		fields = append(defaultFields, "visibility")
 	}
@@ -181,7 +182,7 @@ func listRun(opts *ListOptions) error {
 	totalMatchCount := len(listResult.Repositories)
 	for _, repo := range listResult.Repositories {
 		info := repoInfo(repo)
-		infoColor := cs.Gray
+		infoColor := cs.Muted
 
 		if repo.IsPrivate {
 			infoColor = cs.Yellow
@@ -195,7 +196,7 @@ func listRun(opts *ListOptions) error {
 		tp.AddField(repo.NameWithOwner, tableprinter.WithColor(cs.Bold))
 		tp.AddField(text.RemoveExcessiveWhitespace(repo.Description))
 		tp.AddField(info, tableprinter.WithColor(infoColor))
-		tp.AddTimeField(opts.Now(), *t, cs.Gray)
+		tp.AddTimeField(opts.Now(), *t, cs.Muted)
 		tp.EndRow()
 	}
 

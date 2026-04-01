@@ -2,14 +2,18 @@
 name: "\U0001F41B Bug report"
 about: Report a bug or unexpected behavior while using GitHub CLI
 title: ''
-labels: bug
+labels: ''
 assignees: ''
 
 ---
 
 ### Describe the bug
 
-A clear and concise description of what the bug is. Include version by typing `gh --version`.
+A clear and concise description of what the bug is. 
+
+### Affected version
+
+Please run `gh version` and paste the output below.
 
 ### Steps to reproduce the behavior
 
@@ -24,3 +28,5 @@ A clear and concise description of what you expected to happen and what actually
 ### Logs
 
 Paste the activity from your command line. Redact if needed.
+
+<!-- Note: Set `GH_DEBUG=true` for verbose logs or `GH_DEBUG=api` for verbose logs with HTTP traffic details. -->

@@ -213,5 +213,5 @@ func searchQuery(owner string, filter FilterOptions) string {
 		},
 	}
 
-	return q.String()
+	return q.StandardSearchString()
 }

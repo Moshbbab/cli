@@ -30,7 +30,7 @@ type closeConfig struct {
 // the close command relies on the updateProjectV2 mutation
 type updateProjectMutation struct {
 	UpdateProjectV2 struct {
-		ProjectV2 queries.Project `graphql:"projectV2"`
+		ProjectV2 queries.ProjectMutationQuery `graphql:"projectV2"`
 	} `graphql:"updateProjectV2(input:$input)"`
 }
 
@@ -40,11 +40,11 @@ func NewCmdClose(f *cmdutil.Factory, runF func(config closeConfig) error) *cobra
 		Short: "Close a project",
 		Use:   "close [<number>]",
 		Example: heredoc.Doc(`
-			# close project "1" owned by monalisa
-			gh project close 1 --owner monalisa
+			# Close project "1" owned by monalisa
+			$ gh project close 1 --owner monalisa
 
-			# reopen closed project "1" owned by github
-			gh project close 1 --owner github --undo
+			# Reopen closed project "1" owned by github
+			$ gh project close 1 --owner github --undo
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -123,7 +123,7 @@ func closeArgs(config closeConfig) (*updateProjectMutation, map[string]interface
 	}
 }
 
-func printResults(config closeConfig, project queries.Project) error {
+func printResults(config closeConfig, project queries.ProjectMutationQuery) error {
 	if !config.io.IsStdoutTTY() {
 		return nil
 	}

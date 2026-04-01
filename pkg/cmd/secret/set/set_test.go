@@ -10,7 +10,10 @@ import (
 	"testing"
 
 	"github.com/MakeNowJust/heredoc"
+	ghContext "github.com/cli/cli/v2/context"
+	"github.com/cli/cli/v2/git"
 	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/pkg/cmd/secret/shared"
@@ -19,92 +22,125 @@ import (
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewCmdSet(t *testing.T) {
 	tests := []struct {
-		name     string
-		cli      string
-		wants    SetOptions
-		stdinTTY bool
-		wantsErr bool
+		name            string
+		args            string
+		wants           SetOptions
+		stdinTTY        bool
+		wantsErr        bool
+		wantsErrMessage string
 	}{
 		{
 			name:     "invalid visibility",
-			cli:      "cool_secret --org coolOrg -v'mistyVeil'",
+			args:     "cool_secret --org coolOrg -v mistyVeil",
 			wantsErr: true,
 		},
 		{
-			name:     "invalid visibility",
-			cli:      "cool_secret --org coolOrg -v'selected'",
+			name:            "when visibility is selected, requires indication of repos",
+			args:            "cool_secret --org coolOrg -v selected",
+			wantsErr:        true,
+			wantsErrMessage: "`--repos` or `--no-repos-selected` required with `--visibility=selected`",
+		},
+		{
+			name:            "visibilities other than selected do not accept --repos",
+			args:            "cool_secret --org coolOrg -v private -r coolRepo",
+			wantsErr:        true,
+			wantsErrMessage: "`--repos` is only supported with `--visibility=selected`",
+		},
+		{
+			name:            "visibilities other than selected do not accept --no-repos-selected",
+			args:            "cool_secret --org coolOrg -v private --no-repos-selected",
+			wantsErr:        true,
+			wantsErrMessage: "`--no-repos-selected` is only supported with `--visibility=selected`",
+		},
+		{
+			name:            "--repos and --no-repos-selected are mutually exclusive",
+			args:            `--repos coolRepo --no-repos-selected cool_secret`,
+			wantsErr:        true,
+			wantsErrMessage: "specify only one of `--repos` or `--no-repos-selected`",
+		},
+		{
+			name:     "secret name is required",
+			args:     "",
 			wantsErr: true,
 		},
 		{
-			name:     "repos with wrong vis",
-			cli:      "cool_secret --org coolOrg -v'private' -rcoolRepo",
+			name:     "multiple positional arguments are not allowed",
+			args:     "cool_secret good_secret",
 			wantsErr: true,
 		},
 		{
-			name:     "no name",
-			cli:      "",
+			name:     "visibility is only allowed with --org",
+			args:     "cool_secret -v all",
 			wantsErr: true,
 		},
 		{
-			name:     "multiple names",
-			cli:      "cool_secret good_secret",
-			wantsErr: true,
-		},
-		{
-			name:     "visibility without org",
-			cli:      "cool_secret -vall",
-			wantsErr: true,
-		},
-		{
-			name: "repos without vis",
-			cli:  "cool_secret -bs --org coolOrg -rcoolRepo",
+			name: "providing --repos without --visibility implies selected visibility",
+			args: "cool_secret --body secret-body --org coolOrg --repos coolRepo",
 			wants: SetOptions{
 				SecretName:      "cool_secret",
 				Visibility:      shared.Selected,
 				RepositoryNames: []string{"coolRepo"},
-				Body:            "s",
+				Body:            "secret-body",
+				OrgName:         "coolOrg",
+			},
+		},
+		{
+			name: "providing --no-repos-selected without --visibility implies selected visibility",
+			args: "cool_secret --body secret-body --org coolOrg --no-repos-selected",
+			wants: SetOptions{
+				SecretName:      "cool_secret",
+				Visibility:      shared.Selected,
+				RepositoryNames: []string{},
+				Body:            "secret-body",
 				OrgName:         "coolOrg",
 			},
 		},
 		{
 			name: "org with selected repo",
-			cli:  "-ocoolOrg -bs -vselected -rcoolRepo cool_secret",
+			args: "-o coolOrg --body secret-body -v selected -r coolRepo cool_secret",
 			wants: SetOptions{
 				SecretName:      "cool_secret",
 				Visibility:      shared.Selected,
 				RepositoryNames: []string{"coolRepo"},
-				Body:            "s",
+				Body:            "secret-body",
 				OrgName:         "coolOrg",
 			},
 		},
 		{
 			name: "org with selected repos",
-			cli:  `--org=coolOrg -bs -vselected -r="coolRepo,radRepo,goodRepo" cool_secret`,
+			args: `--org coolOrg --body secret-body -v selected --repos "coolRepo,radRepo,goodRepo" cool_secret`,
 			wants: SetOptions{
 				SecretName:      "cool_secret",
 				Visibility:      shared.Selected,
 				RepositoryNames: []string{"coolRepo", "goodRepo", "radRepo"},
-				Body:            "s",
+				Body:            "secret-body",
 				OrgName:         "coolOrg",
 			},
 		},
 		{
 			name: "user with selected repos",
-			cli:  `-u -bs -r"monalisa/coolRepo,cli/cli,github/hub" cool_secret`,
+			args: `-u --body secret-body -r "monalisa/coolRepo,cli/cli,github/hub" cool_secret`,
 			wants: SetOptions{
 				SecretName:      "cool_secret",
 				Visibility:      shared.Selected,
 				RepositoryNames: []string{"monalisa/coolRepo", "cli/cli", "github/hub"},
-				Body:            "s",
+				Body:            "secret-body",
 			},
 		},
 		{
+			name:            "--user is mutually exclusive with --no-repos-selected",
+			args:            `-u --no-repos-selected cool_secret`,
+			wantsErr:        true,
+			wantsErrMessage: "`--no-repos-selected` must be omitted when used with `--user`",
+		},
+		{
 			name: "repo",
-			cli:  `cool_secret -b"a secret"`,
+			args: `cool_secret --body "a secret"`,
 			wants: SetOptions{
 				SecretName: "cool_secret",
 				Visibility: shared.Private,
@@ -114,7 +150,7 @@ func TestNewCmdSet(t *testing.T) {
 		},
 		{
 			name: "env",
-			cli:  `cool_secret -b"a secret" -eRelease`,
+			args: `cool_secret --body "a secret" --env Release`,
 			wants: SetOptions{
 				SecretName: "cool_secret",
 				Visibility: shared.Private,
@@ -125,7 +161,7 @@ func TestNewCmdSet(t *testing.T) {
 		},
 		{
 			name: "vis all",
-			cli:  `cool_secret --org coolOrg -b"cool" -vall`,
+			args: `cool_secret --org coolOrg --body "cool" --visibility all`,
 			wants: SetOptions{
 				SecretName: "cool_secret",
 				Visibility: shared.All,
@@ -135,7 +171,7 @@ func TestNewCmdSet(t *testing.T) {
 		},
 		{
 			name: "no store",
-			cli:  `cool_secret --no-store`,
+			args: `cool_secret --no-store`,
 			wants: SetOptions{
 				SecretName: "cool_secret",
 				Visibility: shared.Private,
@@ -144,7 +180,7 @@ func TestNewCmdSet(t *testing.T) {
 		},
 		{
 			name: "Dependabot repo",
-			cli:  `cool_secret -b"a secret" --app Dependabot`,
+			args: `cool_secret --body "a secret" --app Dependabot`,
 			wants: SetOptions{
 				SecretName:  "cool_secret",
 				Visibility:  shared.Private,
@@ -155,19 +191,19 @@ func TestNewCmdSet(t *testing.T) {
 		},
 		{
 			name: "Dependabot org",
-			cli:  "-ocoolOrg -bs -vselected -rcoolRepo cool_secret -aDependabot",
+			args: "--org coolOrg --body secret-body --visibility selected --repos coolRepo cool_secret --app Dependabot",
 			wants: SetOptions{
 				SecretName:      "cool_secret",
 				Visibility:      shared.Selected,
 				RepositoryNames: []string{"coolRepo"},
-				Body:            "s",
+				Body:            "secret-body",
 				OrgName:         "coolOrg",
 				Application:     "Dependabot",
 			},
 		},
 		{
 			name: "Codespaces org",
-			cli:  `random_secret -ocoolOrg -b"random value" -vselected -r"coolRepo,cli/cli" -aCodespaces`,
+			args: `random_secret --org coolOrg --body "random value" --visibility selected --repos "coolRepo,cli/cli" --app Codespaces`,
 			wants: SetOptions{
 				SecretName:      "random_secret",
 				Visibility:      shared.Selected,
@@ -188,7 +224,7 @@ func TestNewCmdSet(t *testing.T) {
 
 			ios.SetStdinTTY(tt.stdinTTY)
 
-			argv, err := shlex.Split(tt.cli)
+			argv, err := shlex.Split(tt.args)
 			assert.NoError(t, err)
 
 			var gotOpts *SetOptions
@@ -204,6 +240,9 @@ func TestNewCmdSet(t *testing.T) {
 			_, err = cmd.ExecuteC()
 			if tt.wantsErr {
 				assert.Error(t, err)
+				if tt.wantsErrMessage != "" {
+					assert.EqualError(t, err, tt.wantsErrMessage)
+				}
 				return
 			}
 			assert.NoError(t, err)
@@ -216,6 +255,141 @@ func TestNewCmdSet(t *testing.T) {
 			assert.Equal(t, tt.wants.DoNotStore, gotOpts.DoNotStore)
 			assert.ElementsMatch(t, tt.wants.RepositoryNames, gotOpts.RepositoryNames)
 			assert.Equal(t, tt.wants.Application, gotOpts.Application)
+		})
+	}
+}
+
+func TestNewCmdSetBaseRepoFuncs(t *testing.T) {
+	multipleRemotes := ghContext.Remotes{
+		&ghContext.Remote{
+			Remote: &git.Remote{
+				Name: "origin",
+			},
+			Repo: ghrepo.New("owner", "fork"),
+		},
+		&ghContext.Remote{
+			Remote: &git.Remote{
+				Name: "upstream",
+			},
+			Repo: ghrepo.New("owner", "repo"),
+		},
+	}
+
+	singleRemote := ghContext.Remotes{
+		&ghContext.Remote{
+			Remote: &git.Remote{
+				Name: "origin",
+			},
+			Repo: ghrepo.New("owner", "repo"),
+		},
+	}
+
+	tests := []struct {
+		name          string
+		args          string
+		env           map[string]string
+		remotes       ghContext.Remotes
+		prompterStubs func(*prompter.MockPrompter)
+		wantRepo      ghrepo.Interface
+		wantErr       error
+	}{
+		{
+			name:     "when there is a repo flag provided, the factory base repo func is used",
+			args:     "SECRET_NAME --repo owner/repo",
+			remotes:  multipleRemotes,
+			wantRepo: ghrepo.New("owner", "repo"),
+		},
+		{
+			name: "when GH_REPO env var is provided, the factory base repo func is used",
+			args: "SECRET_NAME",
+			env: map[string]string{
+				"GH_REPO": "owner/repo",
+			},
+			remotes:  multipleRemotes,
+			wantRepo: ghrepo.New("owner", "repo"),
+		},
+		{
+			name:    "when there is no repo flag or GH_REPO env var provided, and no prompting, the base func requiring no ambiguity is used",
+			args:    "SECRET_NAME",
+			remotes: multipleRemotes,
+			wantErr: shared.AmbiguousBaseRepoError{
+				Remotes: multipleRemotes,
+			},
+		},
+		{
+			name:     "when there is no repo flag or GH_REPO env provided, and there is a single remote, the factory base repo func is used",
+			args:     "SECRET_NAME",
+			remotes:  singleRemote,
+			wantRepo: ghrepo.New("owner", "repo"),
+		},
+		{
+			name:    "when there is no repo flag or GH_REPO env var provided, and can prompt, the base func resolving ambiguity is used",
+			args:    "SECRET_NAME",
+			remotes: multipleRemotes,
+			prompterStubs: func(pm *prompter.MockPrompter) {
+				pm.RegisterSelect(
+					"Select a repo",
+					[]string{"owner/fork", "owner/repo"},
+					func(_, _ string, opts []string) (int, error) {
+						return prompter.IndexFor(opts, "owner/fork")
+					},
+				)
+			},
+			wantRepo: ghrepo.New("owner", "fork"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ios, _, _, _ := iostreams.Test()
+			var pm *prompter.MockPrompter
+			if tt.prompterStubs != nil {
+				ios.SetStdinTTY(true)
+				ios.SetStdoutTTY(true)
+				ios.SetStderrTTY(true)
+				pm = prompter.NewMockPrompter(t)
+				tt.prompterStubs(pm)
+			}
+
+			f := &cmdutil.Factory{
+				IOStreams: ios,
+				BaseRepo: func() (ghrepo.Interface, error) {
+					return ghrepo.FromFullName("owner/repo")
+				},
+				Prompter: pm,
+				Remotes: func() (ghContext.Remotes, error) {
+					return tt.remotes, nil
+				},
+			}
+
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+
+			argv, err := shlex.Split(tt.args)
+			assert.NoError(t, err)
+
+			var gotOpts *SetOptions
+			cmd := NewCmdSet(f, func(opts *SetOptions) error {
+				gotOpts = opts
+				return nil
+			})
+			// Require to support --repo flag
+			cmdutil.EnableRepoOverride(cmd, f)
+			cmd.SetArgs(argv)
+			cmd.SetIn(&bytes.Buffer{})
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+
+			_, err = cmd.ExecuteC()
+			require.NoError(t, err)
+
+			baseRepo, err := gotOpts.BaseRepo()
+			if tt.wantErr != nil {
+				require.Equal(t, tt.wantErr, err)
+				return
+			}
+			require.True(t, ghrepo.IsSame(tt.wantRepo, baseRepo))
 		})
 	}
 }
@@ -265,7 +439,7 @@ func Test_setRun_repo(t *testing.T) {
 				HttpClient: func() (*http.Client, error) {
 					return &http.Client{Transport: reg}, nil
 				},
-				Config: func() (config.Config, error) { return config.NewBlankConfig(), nil },
+				Config: func() (gh.Config, error) { return config.NewBlankConfig(), nil },
 				BaseRepo: func() (ghrepo.Interface, error) {
 					return ghrepo.FromFullName("owner/repo")
 				},
@@ -306,7 +480,7 @@ func Test_setRun_env(t *testing.T) {
 		HttpClient: func() (*http.Client, error) {
 			return &http.Client{Transport: reg}, nil
 		},
-		Config: func() (config.Config, error) { return config.NewBlankConfig(), nil },
+		Config: func() (gh.Config, error) { return config.NewBlankConfig(), nil },
 		BaseRepo: func() (ghrepo.Interface, error) {
 			return ghrepo.FromFullName("owner/repo")
 		},
@@ -359,6 +533,16 @@ func Test_setRun_org(t *testing.T) {
 			wantApp:          "actions",
 		},
 		{
+			name: "no repos visibility",
+			opts: &SetOptions{
+				OrgName:         "UmbrellaCorporation",
+				Visibility:      shared.Selected,
+				RepositoryNames: []string{},
+			},
+			wantRepositories: []int64{},
+			wantApp:          "actions",
+		},
+		{
 			name: "Dependabot",
 			opts: &SetOptions{
 				OrgName:     "UmbrellaCorporation",
@@ -377,6 +561,17 @@ func Test_setRun_org(t *testing.T) {
 			},
 			wantDependabotRepositories: []string{"1", "2"},
 			wantApp:                    "dependabot",
+		},
+		{
+			name: "Dependabot no repos visibility",
+			opts: &SetOptions{
+				OrgName:         "UmbrellaCorporation",
+				Visibility:      shared.Selected,
+				Application:     shared.Dependabot,
+				RepositoryNames: []string{},
+			},
+			wantRepositories: []int64{},
+			wantApp:          "dependabot",
 		},
 	}
 
@@ -407,7 +602,7 @@ func Test_setRun_org(t *testing.T) {
 			tt.opts.HttpClient = func() (*http.Client, error) {
 				return &http.Client{Transport: reg}, nil
 			}
-			tt.opts.Config = func() (config.Config, error) {
+			tt.opts.Config = func() (gh.Config, error) {
 				return config.NewBlankConfig(), nil
 			}
 			tt.opts.IO = ios
@@ -489,7 +684,7 @@ func Test_setRun_user(t *testing.T) {
 			tt.opts.HttpClient = func() (*http.Client, error) {
 				return &http.Client{Transport: reg}, nil
 			}
-			tt.opts.Config = func() (config.Config, error) {
+			tt.opts.Config = func() (gh.Config, error) {
 				return config.NewBlankConfig(), nil
 			}
 			tt.opts.IO = ios
@@ -527,7 +722,7 @@ func Test_setRun_shouldNotStore(t *testing.T) {
 		HttpClient: func() (*http.Client, error) {
 			return &http.Client{Transport: reg}, nil
 		},
-		Config: func() (config.Config, error) {
+		Config: func() (gh.Config, error) {
 			return config.NewBlankConfig(), nil
 		},
 		BaseRepo: func() (ghrepo.Interface, error) {
@@ -596,7 +791,7 @@ func Test_getBodyPrompt(t *testing.T) {
 	ios.SetStdoutTTY(true)
 
 	pm := prompter.NewMockPrompter(t)
-	pm.RegisterPassword("Paste your secret", func(_ string) (string, error) {
+	pm.RegisterPassword("Paste your secret:", func(_ string) (string, error) {
 		return "cool secret", nil
 	})
 

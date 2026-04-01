@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/cli/cli/v2/internal/prompter"
 	"github.com/cli/cli/v2/internal/text"
@@ -23,7 +23,7 @@ type browser interface {
 
 type ViewOptions struct {
 	IO         *iostreams.IOStreams
-	Config     func() (config.Config, error)
+	Config     func() (gh.Config, error)
 	HttpClient func() (*http.Client, error)
 	Browser    browser
 	Prompter   prompter.Prompter
@@ -89,15 +89,20 @@ func viewRun(opts *ViewOptions) error {
 
 	cs := opts.IO.ColorScheme()
 	if gistID == "" {
-		gistID, err = shared.PromptGists(opts.Prompter, client, hostname, cs)
+		if !opts.IO.CanPrompt() {
+			return cmdutil.FlagErrorf("gist ID or URL required when not running interactively")
+		}
+
+		gist, err := shared.PromptGists(opts.Prompter, client, hostname, cs)
 		if err != nil {
 			return err
 		}
 
-		if gistID == "" {
+		if gist.ID == "" {
 			fmt.Fprintln(opts.IO.Out, "No gists found.")
 			return nil
 		}
+		gistID = gist.ID
 	}
 
 	if opts.Web {
@@ -131,11 +136,21 @@ func viewRun(opts *ViewOptions) error {
 	defer opts.IO.StopPager()
 
 	render := func(gf *shared.GistFile) error {
+		if gf.Truncated {
+			fullContent, err := shared.GetRawGistFile(client, gf.RawURL)
+
+			if err != nil {
+				return err
+			}
+
+			gf.Content = fullContent
+		}
+
 		if shared.IsBinaryContents([]byte(gf.Content)) {
 			if len(gist.Files) == 1 || opts.Filename != "" {
 				return fmt.Errorf("error: file is binary")
 			}
-			_, err = fmt.Fprintln(opts.IO.Out, cs.Gray("(skipping rendering binary content)"))
+			_, err = fmt.Fprintln(opts.IO.Out, cs.Muted("(skipping rendering binary content)"))
 			return nil
 		}
 
@@ -192,7 +207,7 @@ func viewRun(opts *ViewOptions) error {
 
 	for i, fn := range filenames {
 		if showFilenames {
-			fmt.Fprintf(opts.IO.Out, "%s\n\n", cs.Gray(fn))
+			fmt.Fprintf(opts.IO.Out, "%s\n\n", cs.Muted(fn))
 		}
 		if err := render(gist.Files[fn]); err != nil {
 			return err

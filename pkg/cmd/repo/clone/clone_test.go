@@ -2,10 +2,12 @@ package clone
 
 import (
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/cli/cli/v2/git"
 	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/run"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/httpmock"
@@ -53,6 +55,20 @@ func TestNewCmdClone(t *testing.T) {
 			},
 		},
 		{
+			name: "no-upstream flag",
+			args: "OWNER/REPO --no-upstream",
+			wantOpts: CloneOptions{
+				Repository: "OWNER/REPO",
+				GitArgs:    []string{},
+				NoUpstream: true,
+			},
+		},
+		{
+			name:    "no-upstream with upstream-remote-name",
+			args:    "OWNER/REPO --no-upstream --upstream-remote-name test",
+			wantErr: "if any flags in the group [upstream-remote-name no-upstream] are set none of the others can be; [no-upstream upstream-remote-name] were all set",
+		},
+		{
 			name:    "unknown argument",
 			args:    "OWNER/REPO --depth 1",
 			wantErr: "unknown flag: --depth\nSeparate git clone flags with '--'.",
@@ -90,6 +106,7 @@ func TestNewCmdClone(t *testing.T) {
 
 			assert.Equal(t, tt.wantOpts.Repository, opts.Repository)
 			assert.Equal(t, tt.wantOpts.GitArgs, opts.GitArgs)
+			assert.Equal(t, tt.wantOpts.NoUpstream, opts.NoUpstream)
 		})
 	}
 }
@@ -101,7 +118,7 @@ func runCloneCommand(httpClient *http.Client, cli string) (*test.CmdOut, error) 
 		HttpClient: func() (*http.Client, error) {
 			return httpClient, nil
 		},
-		Config: func() (config.Config, error) {
+		Config: func() (gh.Config, error) {
 			return config.NewBlankConfig(), nil
 		},
 		GitClient: &git.Client{
@@ -164,6 +181,11 @@ func Test_RepoClone(t *testing.T) {
 			want: "git clone https://github.com/OWNER/REPO.git",
 		},
 		{
+			name: "HTTPS URL with extra path parts",
+			args: "https://github.com/OWNER/REPO/extra/part?key=value#fragment",
+			want: "git clone https://github.com/OWNER/REPO.git",
+		},
+		{
 			name: "SSH URL",
 			args: "git@github.com:OWNER/REPO.git",
 			want: "git clone git@github.com:OWNER/REPO.git",
@@ -181,6 +203,11 @@ func Test_RepoClone(t *testing.T) {
 		{
 			name: "wiki URL",
 			args: "https://github.com/owner/repo.wiki",
+			want: "git clone https://github.com/OWNER/REPO.wiki.git",
+		},
+		{
+			name: "wiki URL with extra path parts",
+			args: "https://github.com/owner/repo.wiki/extra/path?key=value#fragment",
 			want: "git clone https://github.com/OWNER/REPO.wiki.git",
 		},
 	}
@@ -330,4 +357,121 @@ func Test_RepoClone_withoutUsername(t *testing.T) {
 
 	assert.Equal(t, "", output.String())
 	assert.Equal(t, "", output.Stderr())
+}
+
+func Test_RepoClone_hasParent_noUpstream(t *testing.T) {
+	reg := &httpmock.Registry{}
+	defer reg.Verify(t)
+	reg.Register(
+		httpmock.GraphQL(`query RepositoryInfo\b`),
+		httpmock.StringResponse(`
+				{ "data": { "repository": {
+					"name": "REPO",
+					"owner": {
+						"login": "OWNER"
+					},
+					"parent": {
+						"name": "ORIG",
+						"owner": {
+							"login": "hubot"
+						},
+						"defaultBranchRef": {
+							"name": "trunk"
+						}
+					}
+				} } }
+				`))
+
+	httpClient := &http.Client{Transport: reg}
+
+	cs, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
+
+	cs.Register(`git clone https://github.com/OWNER/REPO.git`, 0, "")
+	cs.Register(`git -C REPO config --add remote.origin.gh-resolved base`, 0, "")
+
+	_, err := runCloneCommand(httpClient, "OWNER/REPO --no-upstream")
+	if err != nil {
+		t.Fatalf("error running command `repo clone`: %v", err)
+	}
+}
+
+func Test_RepoClone_noParent_noUpstream(t *testing.T) {
+	reg := &httpmock.Registry{}
+	defer reg.Verify(t)
+	reg.Register(
+		httpmock.GraphQL(`query RepositoryInfo\b`),
+		httpmock.StringResponse(`
+				{ "data": { "repository": {
+					"name": "REPO",
+					"owner": {
+						"login": "OWNER"
+					}
+				} } }
+				`))
+
+	httpClient := &http.Client{Transport: reg}
+
+	cs, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
+
+	cs.Register(`git clone https://github.com/OWNER/REPO.git`, 0, "")
+
+	_, err := runCloneCommand(httpClient, "OWNER/REPO --no-upstream")
+	if err != nil {
+		t.Fatalf("error running command `repo clone`: %v", err)
+	}
+}
+
+func TestSimplifyURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		expectedRaw string
+	}{
+		{
+			name:        "empty",
+			raw:         "",
+			expectedRaw: "",
+		},
+		{
+			name:        "no change, no path",
+			raw:         "https://github.com",
+			expectedRaw: "https://github.com",
+		},
+		{
+			name:        "no change, single part path",
+			raw:         "https://github.com/owner",
+			expectedRaw: "https://github.com/owner",
+		},
+		{
+			name:        "no change, two-part path",
+			raw:         "https://github.com/owner/repo",
+			expectedRaw: "https://github.com/owner/repo",
+		},
+		{
+			name:        "no change, three-part path",
+			raw:         "https://github.com/owner/repo/pulls",
+			expectedRaw: "https://github.com/owner/repo",
+		},
+		{
+			name:        "no change, two-part path, with query, with fragment",
+			raw:         "https://github.com/owner/repo?key=value#fragment",
+			expectedRaw: "https://github.com/owner/repo",
+		},
+		{
+			name:        "no change, single part path, with query, with fragment",
+			raw:         "https://github.com/owner?key=value#fragment",
+			expectedRaw: "https://github.com/owner",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := url.Parse(tt.raw)
+			require.NoError(t, err)
+			result := simplifyURL(u)
+			assert.Equal(t, tt.expectedRaw, result.String())
+		})
+	}
 }

@@ -10,12 +10,13 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/cli/cli/v2/internal/ghinstance"
 	ghAPI "github.com/cli/go-gh/v2/pkg/api"
+	ghauth "github.com/cli/go-gh/v2/pkg/auth"
 )
 
 const (
-	accept          = "Accept"
+	apiVersion      = "X-GitHub-Api-Version"
+	apiVersionValue = "2022-11-28"
 	authorization   = "Authorization"
 	cacheTTL        = "X-GH-CACHE-TTL"
 	graphqlFeatures = "GraphQL-Features"
@@ -152,6 +153,8 @@ func (c Client) RESTWithNext(hostname string, method string, p string, body io.R
 }
 
 // HandleHTTPError parses a http.Response into a HTTPError.
+//
+// The caller is responsible to close the response body stream.
 func HandleHTTPError(resp *http.Response) error {
 	return handleResponse(ghAPI.HandleHTTPError(resp))
 }
@@ -196,12 +199,11 @@ func ScopesSuggestion(resp *http.Response) string {
 // EndpointNeedsScopes adds additional OAuth scopes to an HTTP response as if they were returned from the
 // server endpoint. This improves HTTP 4xx error messaging for endpoints that don't explicitly list the
 // OAuth scopes they need.
-func EndpointNeedsScopes(resp *http.Response, s string) *http.Response {
+func EndpointNeedsScopes(resp *http.Response, s string) {
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 		oldScopes := resp.Header.Get("X-Accepted-Oauth-Scopes")
 		resp.Header.Set("X-Accepted-Oauth-Scopes", fmt.Sprintf("%s, %s", oldScopes, s))
 	}
-	return resp
 }
 
 func generateScopesSuggestion(statusCode int, endpointNeedsScopes, tokenHasScopes, hostname string) string {
@@ -249,7 +251,7 @@ func generateScopesSuggestion(statusCode int, endpointNeedsScopes, tokenHasScope
 		return fmt.Sprintf(
 			"This API operation needs the %[1]q scope. To request it, run:  gh auth refresh -h %[2]s -s %[1]s",
 			s,
-			ghinstance.NormalizeHostname(hostname),
+			ghauth.NormalizeHostname(hostname),
 		)
 	}
 
@@ -263,6 +265,7 @@ func clientOptions(hostname string, transport http.RoundTripper) ghAPI.ClientOpt
 		AuthToken: "none",
 		Headers: map[string]string{
 			authorization: "",
+			apiVersion:    apiVersionValue,
 		},
 		Host:               hostname,
 		SkipDefaultHeaders: true,

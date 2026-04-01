@@ -48,6 +48,22 @@ func TestNewCmdeditItem(t *testing.T) {
 			},
 		},
 		{
+			name: "number with floating point value",
+			cli:  "--number 123.45 --id 123",
+			wants: editItemOpts{
+				number: 123.45,
+				itemID: "123",
+			},
+		},
+		{
+			name: "number zero",
+			cli:  "--number 0 --id 123",
+			wants: editItemOpts{
+				number: 0,
+				itemID: "123",
+			},
+		},
+		{
 			name: "field-id",
 			cli:  "--field-id FIELD_ID --id 123",
 			wants: editItemOpts{
@@ -113,6 +129,15 @@ func TestNewCmdeditItem(t *testing.T) {
 			},
 			wantsExporter: true,
 		},
+		{
+			name: "draft issue body only",
+			cli:  "--id 123 --body foobar",
+			wants: editItemOpts{
+				itemID:      "123",
+				body:        "foobar",
+				bodyChanged: true,
+			},
+		},
 	}
 
 	t.Setenv("GH_TOKEN", "auth-token")
@@ -154,6 +179,9 @@ func TestNewCmdeditItem(t *testing.T) {
 			assert.Equal(t, tt.wants.singleSelectOptionID, gotOpts.singleSelectOptionID)
 			assert.Equal(t, tt.wants.iterationID, gotOpts.iterationID)
 			assert.Equal(t, tt.wants.clear, gotOpts.clear)
+			assert.Equal(t, tt.wants.titleChanged, gotOpts.titleChanged)
+			assert.Equal(t, tt.wants.bodyChanged, gotOpts.bodyChanged)
+			assert.Equal(t, tt.wants.body, gotOpts.body)
 		})
 	}
 }
@@ -186,9 +214,11 @@ func TestRunItemEdit_Draft(t *testing.T) {
 	config := editItemConfig{
 		io: ios,
 		opts: editItemOpts{
-			title:  "a title",
-			body:   "a new body",
-			itemID: "DI_item_id",
+			title:        "a title",
+			titleChanged: true,
+			body:         "a new body",
+			bodyChanged:  true,
+			itemID:       "DI_item_id",
 		},
 		client: client,
 	}
@@ -199,6 +229,154 @@ func TestRunItemEdit_Draft(t *testing.T) {
 		t,
 		"Edited draft issue \"a title\"\n",
 		stdout.String())
+}
+
+func TestRunItemEdit_DraftTitleOnly(t *testing.T) {
+	defer gock.Off()
+
+	gock.New("https://api.github.com").
+		Post("/graphql").
+		BodyString(`{"query":"query DraftIssueByID.*","variables":{"id":"DI_item_id"}}`).
+		Reply(200).
+		JSON(map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"id":    "DI_item_id",
+					"title": "existing title",
+					"body":  "existing body",
+				},
+			},
+		})
+
+	gock.New("https://api.github.com").
+		Post("/graphql").
+		BodyString(`{"query":"mutation EditDraftIssueItem.*","variables":{"input":{"draftIssueId":"DI_item_id","title":"new title","body":"existing body"}}}`).
+		Reply(200).
+		JSON(map[string]interface{}{
+			"data": map[string]interface{}{
+				"updateProjectV2DraftIssue": map[string]interface{}{
+					"draftIssue": map[string]interface{}{
+						"title": "new title",
+						"body":  "existing body",
+					},
+				},
+			},
+		})
+
+	client := queries.NewTestClient()
+
+	ios, _, stdout, _ := iostreams.Test()
+	ios.SetStdoutTTY(true)
+
+	config := editItemConfig{
+		io: ios,
+		opts: editItemOpts{
+			title:        "new title",
+			titleChanged: true,
+			bodyChanged:  false,
+			itemID:       "DI_item_id",
+		},
+		client: client,
+	}
+
+	err := runEditItem(config)
+	assert.NoError(t, err)
+	assert.Equal(
+		t,
+		"Edited draft issue \"new title\"\n",
+		stdout.String())
+}
+
+func TestRunItemEdit_DraftBodyOnly(t *testing.T) {
+	defer gock.Off()
+
+	gock.New("https://api.github.com").
+		Post("/graphql").
+		BodyString(`{"query":"query DraftIssueByID.*","variables":{"id":"DI_item_id"}}`).
+		Reply(200).
+		JSON(map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"id":    "DI_item_id",
+					"title": "existing title",
+					"body":  "existing body",
+				},
+			},
+		})
+
+	gock.New("https://api.github.com").
+		Post("/graphql").
+		BodyString(`{"query":"mutation EditDraftIssueItem.*","variables":{"input":{"draftIssueId":"DI_item_id","title":"existing title","body":"new body"}}}`).
+		Reply(200).
+		JSON(map[string]interface{}{
+			"data": map[string]interface{}{
+				"updateProjectV2DraftIssue": map[string]interface{}{
+					"draftIssue": map[string]interface{}{
+						"title": "existing title",
+						"body":  "new body",
+					},
+				},
+			},
+		})
+
+	client := queries.NewTestClient()
+
+	ios, _, stdout, _ := iostreams.Test()
+	ios.SetStdoutTTY(true)
+
+	config := editItemConfig{
+		io: ios,
+		opts: editItemOpts{
+			titleChanged: false,
+			body:         "new body",
+			bodyChanged:  true,
+			itemID:       "DI_item_id",
+		},
+		client: client,
+	}
+
+	err := runEditItem(config)
+	assert.NoError(t, err)
+	assert.Equal(
+		t,
+		"Edited draft issue \"existing title\"\n",
+		stdout.String())
+}
+
+func TestRunItemEdit_DraftFetchError(t *testing.T) {
+	defer gock.Off()
+
+	gock.New("https://api.github.com").
+		Post("/graphql").
+		BodyString(`{"query":"query DraftIssueByID.*","variables":{"id":"DI_item_id"}}`).
+		Reply(200).
+		JSON(map[string]interface{}{
+			"errors": []map[string]interface{}{
+				{
+					"type":    "NOT_FOUND",
+					"message": "Could not resolve to a node with the global id of 'DI_item_id' (node)",
+				},
+			},
+		})
+
+	client := queries.NewTestClient()
+
+	ios, _, _, _ := iostreams.Test()
+
+	config := editItemConfig{
+		io: ios,
+		opts: editItemOpts{
+			title:        "new title",
+			titleChanged: true,
+			bodyChanged:  false,
+			itemID:       "DI_item_id",
+		},
+		client: client,
+	}
+
+	err := runEditItem(config)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Could not resolve to a node")
 }
 
 func TestRunItemEdit_Text(t *testing.T) {
@@ -216,10 +394,9 @@ func TestRunItemEdit_Text(t *testing.T) {
 					"projectV2Item": map[string]interface{}{
 						"ID": "item_id",
 						"content": map[string]interface{}{
-							"__typename": "Issue",
-							"body":       "body",
-							"title":      "title",
-							"number":     1,
+							"body":   "body",
+							"title":  "title",
+							"number": 1,
 							"repository": map[string]interface{}{
 								"nameWithOwner": "my-repo",
 							},
@@ -255,7 +432,7 @@ func TestRunItemEdit_Number(t *testing.T) {
 	// edit item
 	gock.New("https://api.github.com").
 		Post("/graphql").
-		BodyString(`{"query":"mutation UpdateItemValues.*","variables":{"input":{"projectId":"project_id","itemId":"item_id","fieldId":"field_id","value":{"number":2}}}}`).
+		BodyString(`{"query":"mutation UpdateItemValues.*","variables":{"input":{"projectId":"project_id","itemId":"item_id","fieldId":"field_id","value":{"number":123.45}}}}`).
 		Reply(200).
 		JSON(map[string]interface{}{
 			"data": map[string]interface{}{
@@ -284,10 +461,64 @@ func TestRunItemEdit_Number(t *testing.T) {
 	config := editItemConfig{
 		io: ios,
 		opts: editItemOpts{
-			number:    2,
-			itemID:    "item_id",
-			projectID: "project_id",
-			fieldID:   "field_id",
+			number:        123.45,
+			numberChanged: true,
+			itemID:        "item_id",
+			projectID:     "project_id",
+			fieldID:       "field_id",
+		},
+		client: client,
+	}
+
+	err := runEditItem(config)
+	assert.NoError(t, err)
+	assert.Equal(
+		t,
+		"Edited item \"title\"\n",
+		stdout.String())
+}
+
+func TestRunItemEdit_NumberZero(t *testing.T) {
+	defer gock.Off()
+	// gock.Observe(gock.DumpRequest)
+
+	// edit item
+	gock.New("https://api.github.com").
+		Post("/graphql").
+		BodyString(`{"query":"mutation UpdateItemValues.*","variables":{"input":{"projectId":"project_id","itemId":"item_id","fieldId":"field_id","value":{"number":0}}}}`).
+		Reply(200).
+		JSON(map[string]interface{}{
+			"data": map[string]interface{}{
+				"updateProjectV2ItemFieldValue": map[string]interface{}{
+					"projectV2Item": map[string]interface{}{
+						"ID": "item_id",
+						"content": map[string]interface{}{
+							"__typename": "Issue",
+							"body":       "body",
+							"title":      "title",
+							"number":     1,
+							"repository": map[string]interface{}{
+								"nameWithOwner": "my-repo",
+							},
+						},
+					},
+				},
+			},
+		})
+
+	client := queries.NewTestClient()
+
+	ios, _, stdout, _ := iostreams.Test()
+	ios.SetStdoutTTY(true)
+
+	config := editItemConfig{
+		io: ios,
+		opts: editItemOpts{
+			number:        0,
+			numberChanged: true,
+			itemID:        "item_id",
+			projectID:     "project_id",
+			fieldID:       "field_id",
 		},
 		client: client,
 	}
@@ -474,9 +705,11 @@ func TestRunItemEdit_InvalidID(t *testing.T) {
 	client := queries.NewTestClient()
 	config := editItemConfig{
 		opts: editItemOpts{
-			title:  "a title",
-			body:   "a new body",
-			itemID: "item_id",
+			title:        "a title",
+			titleChanged: true,
+			body:         "a new body",
+			bodyChanged:  true,
+			itemID:       "item_id",
 		},
 		client: client,
 	}
@@ -560,10 +793,12 @@ func TestRunItemEdit_JSON(t *testing.T) {
 	config := editItemConfig{
 		io: ios,
 		opts: editItemOpts{
-			title:    "a title",
-			body:     "a new body",
-			itemID:   "DI_item_id",
-			exporter: cmdutil.NewJSONExporter(),
+			title:        "a title",
+			titleChanged: true,
+			body:         "a new body",
+			bodyChanged:  true,
+			itemID:       "DI_item_id",
+			exporter:     cmdutil.NewJSONExporter(),
 		},
 		client: client,
 	}

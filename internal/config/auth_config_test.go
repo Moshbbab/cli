@@ -13,7 +13,7 @@ import (
 // Note that NewIsolatedTestConfig sets up a Mock keyring as well
 func newTestAuthConfig(t *testing.T) *AuthConfig {
 	cfg, _ := NewIsolatedTestConfig(t)
-	return cfg.Authentication()
+	return &AuthConfig{cfg: cfg.cfg}
 }
 
 func TestTokenFromKeyring(t *testing.T) {
@@ -52,8 +52,32 @@ func TestTokenFromKeyringForUserErrorsIfUsernameIsBlank(t *testing.T) {
 	require.ErrorContains(t, err, "username cannot be blank")
 }
 
+func TestHasActiveToken(t *testing.T) {
+	// Given the user has logged in for a host
+	authCfg := newTestAuthConfig(t)
+	_, err := authCfg.Login("github.com", "test-user", "test-token", "", false)
+	require.NoError(t, err)
+
+	// When we check if that host has an active token
+	hasActiveToken := authCfg.HasActiveToken("github.com")
+
+	// Then there is an active token
+	require.True(t, hasActiveToken, "expected there to be an active token")
+}
+
+func TestHasNoActiveToken(t *testing.T) {
+	// Given there are no users logged in for a host
+	authCfg := newTestAuthConfig(t)
+
+	// When we check if any host has an active token
+	hasActiveToken := authCfg.HasActiveToken("github.com")
+
+	// Then there is no active token
+	require.False(t, hasActiveToken, "expected there to be no active token")
+}
+
 func TestTokenStoredInConfig(t *testing.T) {
-	// When the user has logged in insecurely
+	// Given the user has logged in insecurely
 	authCfg := newTestAuthConfig(t)
 	_, err := authCfg.Login("github.com", "test-user", "test-token", "", false)
 	require.NoError(t, err)
@@ -743,6 +767,62 @@ func TestTokenWorksRightAfterMigration(t *testing.T) {
 	token, source := authCfg.ActiveToken("github.com")
 	require.Equal(t, "test-token", token)
 	require.Equal(t, oauthTokenKey, source)
+}
+
+func TestTokenPrioritizesActiveUserToken(t *testing.T) {
+	// Given a keyring where the active slot contains the token from a previous user
+	authCfg := newTestAuthConfig(t)
+	require.NoError(t, keyring.Set(keyringServiceName("github.com"), "", "test-token"))
+	require.NoError(t, keyring.Set(keyringServiceName("github.com"), "test-user1", "test-token"))
+	require.NoError(t, keyring.Set(keyringServiceName("github.com"), "test-user2", "test-token2"))
+
+	// When no active user is set
+	authCfg.cfg.Remove([]string{hostsKey, "github.com", userKey})
+
+	// And get the token from the auth config
+	token, source := authCfg.ActiveToken("github.com")
+
+	// Then it returns the token from the keyring active slot
+	require.Equal(t, "keyring", source)
+	require.Equal(t, "test-token", token)
+
+	// When we set the active user to test-user1
+	authCfg.cfg.Set([]string{hostsKey, "github.com", userKey}, "test-user1")
+
+	// And get the token from the auth config
+	token, source = authCfg.ActiveToken("github.com")
+
+	// Then it returns the token from the active user entry in the keyring
+	require.Equal(t, "keyring", source)
+	require.Equal(t, "test-token", token)
+
+	// When we set the active user to test-user2
+	authCfg.cfg.Set([]string{hostsKey, "github.com", userKey}, "test-user2")
+
+	// And get the token from the auth config
+	token, source = authCfg.ActiveToken("github.com")
+
+	// Then it returns the token from the active user entry in the keyring
+	require.Equal(t, "keyring", source)
+	require.Equal(t, "test-token2", token)
+}
+
+func TestTokenWithActiveUserNotInKeyringFallsBackToBlank(t *testing.T) {
+	// Given a keyring that contains a token for a host
+	authCfg := newTestAuthConfig(t)
+	require.NoError(t, keyring.Set(keyringServiceName("github.com"), "", "test-token"))
+	require.NoError(t, keyring.Set(keyringServiceName("github.com"), "test-user1", "test-token1"))
+	require.NoError(t, keyring.Set(keyringServiceName("github.com"), "test-user2", "test-token2"))
+
+	// When we set the active user to test-user3
+	authCfg.cfg.Set([]string{hostsKey, "github.com", userKey}, "test-user3")
+
+	// And get the token from the auth config
+	token, source := authCfg.ActiveToken("github.com")
+
+	// Then it returns successfully with the fallback token
+	require.Equal(t, "keyring", source)
+	require.Equal(t, "test-token", token)
 }
 
 func TestLogoutRightAfterMigrationRemovesHost(t *testing.T) {

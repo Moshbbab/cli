@@ -88,6 +88,26 @@ func Test_NewCmdDiff(t *testing.T) {
 			wantErr: "argument required when using the `--repo` flag",
 		},
 		{
+			name:  "exclude single pattern",
+			args:  "--exclude '*.yml'",
+			isTTY: true,
+			want: DiffOptions{
+				SelectorArg: "",
+				UseColor:    true,
+				Exclude:     []string{"*.yml"},
+			},
+		},
+		{
+			name:  "exclude multiple patterns",
+			args:  "--exclude '*.yml' --exclude Makefile",
+			isTTY: true,
+			want: DiffOptions{
+				SelectorArg: "",
+				UseColor:    true,
+				Exclude:     []string{"*.yml", "Makefile"},
+			},
+		},
+		{
 			name:    "invalid --color argument",
 			args:    "--color doublerainbow",
 			isTTY:   true,
@@ -142,6 +162,7 @@ func Test_NewCmdDiff(t *testing.T) {
 			assert.Equal(t, tt.want.SelectorArg, opts.SelectorArg)
 			assert.Equal(t, tt.want.UseColor, opts.UseColor)
 			assert.Equal(t, tt.want.BrowserMode, opts.BrowserMode)
+			assert.Equal(t, tt.want.Exclude, opts.Exclude)
 		})
 	}
 }
@@ -179,7 +200,7 @@ func Test_diffRun(t *testing.T) {
 				Patch:       false,
 			},
 			wantFields: []string{"number"},
-			wantStdout: fmt.Sprintf(testDiff, "\x1b[m", "\x1b[1;38m", "\x1b[32m", "\x1b[31m"),
+			wantStdout: fmt.Sprintf(testDiff, "\x1b[m", "\x1b[1;37m", "\x1b[32m", "\x1b[31m"),
 			httpStubs: func(reg *httpmock.Registry) {
 				stubDiffRequest(reg, "application/vnd.github.v3.diff", fmt.Sprintf(testDiff, "", "", "", ""))
 			},
@@ -212,13 +233,55 @@ func Test_diffRun(t *testing.T) {
 			},
 		},
 		{
+			name: "exclude yml files",
+			opts: DiffOptions{
+				SelectorArg: "123",
+				UseColor:    false,
+				Exclude:     []string{"*.yml"},
+			},
+			wantFields: []string{"number"},
+			wantStdout: `diff --git a/Makefile b/Makefile
+index f2b4805c..3d7bd0f9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -22,8 +22,8 @@ test:
+ 	go test ./...
+ .PHONY: test
+
+-site:
+-	git clone https://github.com/github/cli.github.com.git "$@"
++site: bin/gh
++	bin/gh repo clone github/cli.github.com "$@"
+
+ site-docs: site
+ 	git -C site pull
+`,
+			httpStubs: func(reg *httpmock.Registry) {
+				stubDiffRequest(reg, "application/vnd.github.v3.diff", fmt.Sprintf(testDiff, "", "", "", ""))
+			},
+		},
+		{
+			name: "name only with exclude",
+			opts: DiffOptions{
+				SelectorArg: "123",
+				UseColor:    false,
+				NameOnly:    true,
+				Exclude:     []string{"*.yml"},
+			},
+			wantFields: []string{"number"},
+			wantStdout: "Makefile\n",
+			httpStubs: func(reg *httpmock.Registry) {
+				stubDiffRequest(reg, "application/vnd.github.v3.diff", fmt.Sprintf(testDiff, "", "", "", ""))
+			},
+		},
+		{
 			name: "web mode",
 			opts: DiffOptions{
 				SelectorArg: "123",
 				BrowserMode: true,
 			},
 			wantFields:     []string{"url"},
-			wantStderr:     "Opening github.com/OWNER/REPO/pull/123/files in your browser.\n",
+			wantStderr:     "Opening https://github.com/OWNER/REPO/pull/123/files in your browser.\n",
 			wantBrowsedURL: "https://github.com/OWNER/REPO/pull/123/files",
 		},
 	}
@@ -313,7 +376,7 @@ func Test_colorDiffLines(t *testing.T) {
 				"%[4]s+foo%[2]s\n%[5]s-b%[1]sr%[2]s\n%[3]s+++ baz%[2]s\n",
 				strings.Repeat("a", 2*lineBufferSize),
 				"\x1b[m",
-				"\x1b[1;38m",
+				"\x1b[1;37m",
 				"\x1b[32m",
 				"\x1b[31m",
 			),
@@ -358,6 +421,10 @@ func Test_changedFileNames(t *testing.T) {
 			input:  fmt.Sprintf("diff --git a/baz.go b/baz.go\n--- a/baz.go\n+++ b/baz.go\n+foo\n-b%sr", strings.Repeat("a", 2*lineBufferSize)),
 			output: "baz.go\n",
 		},
+		{
+			input:  "diff --git \"a/\343\202\212\343\203\274\343\201\251\343\201\277\343\203\274.md\" \"b/\343\202\212\343\203\274\343\201\251\343\201\277\343\203\274.md\"",
+			output: "\"\343\202\212\343\203\274\343\201\251\343\201\277\343\203\274.md\"\n",
+		},
 	}
 	for _, tt := range inputs {
 		buf := bytes.Buffer{}
@@ -388,6 +455,116 @@ func stubDiffRequest(reg *httpmock.Registry, accept, diff string) {
 				Body:       io.NopCloser(strings.NewReader(diff)),
 			}, nil
 		})
+}
+
+func Test_filterDiff(t *testing.T) {
+	rawDiff := fmt.Sprintf(testDiff, "", "", "", "")
+
+	tests := []struct {
+		name     string
+		patterns []string
+		want     string
+	}{
+		{
+			name:     "exclude yml files",
+			patterns: []string{"*.yml"},
+			want: `diff --git a/Makefile b/Makefile
+index f2b4805c..3d7bd0f9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -22,8 +22,8 @@ test:
+ 	go test ./...
+ .PHONY: test
+
+-site:
+-	git clone https://github.com/github/cli.github.com.git "$@"
++site: bin/gh
++	bin/gh repo clone github/cli.github.com "$@"
+
+ site-docs: site
+ 	git -C site pull
+`,
+		},
+		{
+			name:     "exclude Makefile",
+			patterns: []string{"Makefile"},
+			want: `diff --git a/.github/workflows/releases.yml b/.github/workflows/releases.yml
+index 73974448..b7fc0154 100644
+--- a/.github/workflows/releases.yml
++++ b/.github/workflows/releases.yml
+@@ -44,6 +44,11 @@ jobs:
+           token: ${{secrets.SITE_GITHUB_TOKEN}}
+       - name: Publish documentation site
+         if: "!contains(github.ref, '-')" # skip prereleases
++        env:
++          GIT_COMMITTER_NAME: cli automation
++          GIT_AUTHOR_NAME: cli automation
++          GIT_COMMITTER_EMAIL: noreply@github.com
++          GIT_AUTHOR_EMAIL: noreply@github.com
+         run: make site-publish
+       - name: Move project cards
+         if: "!contains(github.ref, '-')" # skip prereleases
+`,
+		},
+		{
+			name:     "exclude all files",
+			patterns: []string{"*.yml", "Makefile"},
+			want:     "",
+		},
+		{
+			name:     "no matches",
+			patterns: []string{"*.go"},
+			want:     rawDiff,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader, err := filterDiff(strings.NewReader(rawDiff), tt.patterns)
+			require.NoError(t, err)
+			got, err := io.ReadAll(reader)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(got))
+		})
+	}
+}
+
+func Test_matchesAny(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		patterns []string
+		want     bool
+	}{
+		{
+			name:     "exact match",
+			filename: "Makefile",
+			patterns: []string{"Makefile"},
+			want:     true,
+		},
+		{
+			name:     "glob extension",
+			filename: ".github/workflows/releases.yml",
+			patterns: []string{"*.yml"},
+			want:     true,
+		},
+		{
+			name:     "no match",
+			filename: "main.go",
+			patterns: []string{"*.yml"},
+			want:     false,
+		},
+		{
+			name:     "directory glob",
+			filename: ".github/workflows/releases.yml",
+			patterns: []string{".github/*/*"},
+			want:     true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, matchesAny(tt.filename, tt.patterns))
+		})
+	}
 }
 
 func Test_sanitizedReader(t *testing.T) {

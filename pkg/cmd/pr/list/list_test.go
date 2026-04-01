@@ -11,6 +11,7 @@ import (
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/browser"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/run"
 	prShared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
@@ -23,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func runCommand(rt http.RoundTripper, isTTY bool, cli string) (*test.CmdOut, error) {
+func runCommand(rt http.RoundTripper, detector fd.Detector, isTTY bool, cli string) (*test.CmdOut, error) {
 	ios, _, stdout, stderr := iostreams.Test()
 	ios.SetStdoutTTY(isTTY)
 	ios.SetStdinTTY(isTTY)
@@ -47,6 +48,7 @@ func runCommand(rt http.RoundTripper, isTTY bool, cli string) (*test.CmdOut, err
 
 	cmd := NewCmdList(factory, func(opts *ListOptions) error {
 		opts.Now = fakeNow
+		opts.Detector = detector
 		return listRun(opts)
 	})
 
@@ -78,7 +80,7 @@ func TestPRList(t *testing.T) {
 
 	http.Register(httpmock.GraphQL(`query PullRequestList\b`), httpmock.FileResponse("./fixtures/prList.json"))
 
-	output, err := runCommand(http, true, "")
+	output, err := runCommand(http, nil, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +103,7 @@ func TestPRList_nontty(t *testing.T) {
 
 	http.Register(httpmock.GraphQL(`query PullRequestList\b`), httpmock.FileResponse("./fixtures/prList.json"))
 
-	output, err := runCommand(http, false, "")
+	output, err := runCommand(http, nil, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +126,7 @@ func TestPRList_filtering(t *testing.T) {
 			assert.Equal(t, []interface{}{"OPEN", "CLOSED", "MERGED"}, params["state"].([]interface{}))
 		}))
 
-	output, err := runCommand(http, true, `-s all`)
+	output, err := runCommand(http, nil, true, `-s all`)
 	assert.Error(t, err)
 
 	assert.Equal(t, "", output.String())
@@ -139,7 +141,7 @@ func TestPRList_filteringRemoveDuplicate(t *testing.T) {
 		httpmock.GraphQL(`query PullRequestList\b`),
 		httpmock.FileResponse("./fixtures/prListWithDuplicates.json"))
 
-	output, err := runCommand(http, true, "")
+	output, err := runCommand(http, nil, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +164,7 @@ func TestPRList_filteringClosed(t *testing.T) {
 			assert.Equal(t, []interface{}{"CLOSED", "MERGED"}, params["state"].([]interface{}))
 		}))
 
-	_, err := runCommand(http, true, `-s closed`)
+	_, err := runCommand(http, nil, true, `-s closed`)
 	assert.Error(t, err)
 }
 
@@ -176,7 +178,7 @@ func TestPRList_filteringHeadBranch(t *testing.T) {
 			assert.Equal(t, interface{}("bug-fix"), params["headBranch"])
 		}))
 
-	_, err := runCommand(http, true, `-H bug-fix`)
+	_, err := runCommand(http, nil, true, `-H bug-fix`)
 	assert.Error(t, err)
 }
 
@@ -190,7 +192,9 @@ func TestPRList_filteringAssignee(t *testing.T) {
 			assert.Equal(t, `assignee:hubot base:develop is:merged label:"needs tests" repo:OWNER/REPO type:pr`, params["q"].(string))
 		}))
 
-	_, err := runCommand(http, true, `-s merged -l "needs tests" -a hubot -B develop`)
+	// TODO advancedIssueSearchCleanup
+	// No need for feature detection once GHES 3.17 support ends.
+	_, err := runCommand(http, fd.AdvancedIssueSearchSupportedAsOptIn(), true, `-s merged -l "needs tests" -a hubot -B develop`)
 	assert.Error(t, err)
 }
 
@@ -223,7 +227,9 @@ func TestPRList_filteringDraft(t *testing.T) {
 					assert.Equal(t, test.expectedQuery, params["q"].(string))
 				}))
 
-			_, err := runCommand(http, true, test.cli)
+			// TODO advancedIssueSearchCleanup
+			// No need for feature detection once GHES 3.17 support ends.
+			_, err := runCommand(http, fd.AdvancedIssueSearchSupportedAsOptIn(), true, test.cli)
 			assert.Error(t, err)
 		})
 	}
@@ -268,7 +274,9 @@ func TestPRList_filteringAuthor(t *testing.T) {
 					assert.Equal(t, test.expectedQuery, params["q"].(string))
 				}))
 
-			_, err := runCommand(http, true, test.cli)
+			// TODO advancedIssueSearchCleanup
+			// No need for feature detection once GHES 3.17 support ends.
+			_, err := runCommand(http, fd.AdvancedIssueSearchSupportedAsOptIn(), true, test.cli)
 			assert.Error(t, err)
 		})
 	}
@@ -277,7 +285,7 @@ func TestPRList_filteringAuthor(t *testing.T) {
 func TestPRList_withInvalidLimitFlag(t *testing.T) {
 	http := initFakeHTTP()
 	defer http.Verify(t)
-	_, err := runCommand(http, true, `--limit=0`)
+	_, err := runCommand(http, nil, true, `--limit=0`)
 	assert.EqualError(t, err, "invalid value for --limit: 0")
 }
 
@@ -312,13 +320,13 @@ func TestPRList_web(t *testing.T) {
 			_, cmdTeardown := run.Stub()
 			defer cmdTeardown(t)
 
-			output, err := runCommand(http, true, "--web "+test.cli)
+			output, err := runCommand(http, nil, true, "--web "+test.cli)
 			if err != nil {
 				t.Errorf("error running command `pr list` with `--web` flag: %v", err)
 			}
 
 			assert.Equal(t, "", output.String())
-			assert.Equal(t, "Opening github.com/OWNER/REPO/pulls in your browser.\n", output.Stderr())
+			assert.Equal(t, "Opening https://github.com/OWNER/REPO/pulls in your browser.\n", output.Stderr())
 			assert.Equal(t, test.expectedBrowserURL, output.BrowsedURL)
 		})
 	}
@@ -370,6 +378,7 @@ func TestPRList_withProjectItems(t *testing.T) {
 	client := &http.Client{Transport: reg}
 	prsAndTotalCount, err := listPullRequests(
 		client,
+		nil,
 		ghrepo.New("OWNER", "REPO"),
 		prShared.FilterOptions{
 			Entity: "pr",
@@ -432,13 +441,17 @@ func TestPRList_Search_withProjectItems(t *testing.T) {
 		  }`, func(_ string, params map[string]interface{}) {
 			require.Equal(t, map[string]interface{}{
 				"limit": float64(30),
-				"q":     "just used to force the search API branch repo:OWNER/REPO state:open type:pr",
+				"q":     "( just used to force the search API branch ) repo:OWNER/REPO state:open type:pr",
+				"type":  "ISSUE_ADVANCED",
 			}, params)
 		}))
 
 	client := &http.Client{Transport: reg}
 	prsAndTotalCount, err := listPullRequests(
 		client,
+		// TODO advancedIssueSearchCleanup
+		// No need for feature detection once GHES 3.17 support ends.
+		fd.AdvancedIssueSearchSupportedAsOptIn(),
 		ghrepo.New("OWNER", "REPO"),
 		prShared.FilterOptions{
 			Entity: "pr",

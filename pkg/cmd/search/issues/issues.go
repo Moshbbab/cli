@@ -26,7 +26,9 @@ func NewCmdIssues(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *c
 	cmd := &cobra.Command{
 		Use:   "issues [<query>]",
 		Short: "Search for issues",
-		Long: heredoc.Doc(`
+		// TODO advancedIssueSearchCleanup
+		// Update the links and remove the mention at GHES 3.17 version.
+		Long: heredoc.Docf(`
 			Search for issues on GitHub.
 
 			The command supports constructing queries using the GitHub search syntax,
@@ -34,30 +36,35 @@ func NewCmdIssues(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *c
 
 			GitHub search syntax is documented at:
 			<https://docs.github.com/search-github/searching-on-github/searching-issues-and-pull-requests>
-    `),
+
+			On supported GitHub hosts, advanced issue search syntax can be used in the
+			%[1]s--search%[1]s query. For more information about advanced issue search, see:
+			<https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/filtering-and-searching-issues-and-pull-requests#building-advanced-filters-for-issues>
+
+			For more information on handling search queries containing a hyphen, run %[1]sgh search --help%[1]s.
+		`, "`"),
 		Example: heredoc.Doc(`
-			# search issues matching set of keywords "readme" and "typo"
+			# Search issues matching set of keywords "readme" and "typo"
 			$ gh search issues readme typo
 
-			# search issues matching phrase "broken feature"
+			# Search issues matching phrase "broken feature"
 			$ gh search issues "broken feature"
 
-			# search issues and pull requests in cli organization
+			# Search issues and pull requests in cli organization
 			$ gh search issues --include-prs --owner=cli
 
-			# search open issues assigned to yourself
+			# Search open issues assigned to yourself
 			$ gh search issues --assignee=@me --state=open
 
-			# search issues with numerous comments
+			# Search issues with numerous comments
 			$ gh search issues --comments=">100"
 
-			# search issues without label "bug"
+			# Search issues without label "bug"
 			$ gh search issues -- -label:bug
 
-			# search issues only from un-archived repositories (default is all repositories)
+			# Search issues only from un-archived repositories (default is all repositories)
 			$ gh search issues --owner github --archived=false
-
-    `),
+		`),
 		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 && c.Flags().NFlag() == 0 {
 				return cmdutil.FlagErrorf("specify search keywords or flags")
@@ -158,7 +165,7 @@ func NewCmdIssues(f *cmdutil.Factory, runF func(*shared.IssuesOptions) error) *c
 	cmd.Flags().BoolVar(&noLabel, "no-label", false, "Filter on missing label")
 	cmd.Flags().BoolVar(&noMilestone, "no-milestone", false, "Filter on missing milestone")
 	cmd.Flags().BoolVar(&noProject, "no-project", false, "Filter on missing project")
-	cmd.Flags().StringVar(&opts.Query.Qualifiers.Project, "project", "", "Filter on project board `number`")
+	cmd.Flags().StringVar(&opts.Query.Qualifiers.Project, "project", "", "Filter on project board `owner/number`")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Reactions, "reactions", "", "Filter on `number` of reactions")
 	cmd.Flags().StringSliceVarP(&opts.Query.Qualifiers.Repo, "repo", "R", nil, "Filter on repository")
 	cmdutil.StringEnumFlag(cmd, &opts.Query.Qualifiers.State, "state", "", "", []string{"open", "closed"}, "Filter based on state")

@@ -16,14 +16,17 @@ import (
 
 type editItemOpts struct {
 	// updateDraftIssue
-	title  string
-	body   string
-	itemID string
+	title        string
+	titleChanged bool
+	body         string
+	bodyChanged  bool
+	itemID       string
 	// updateItem
 	fieldID              string
 	projectID            string
 	text                 string
-	number               float32
+	number               float64
+	numberChanged        bool
 	date                 string
 	singleSelectOptionID string
 	iterationID          string
@@ -42,6 +45,12 @@ type EditProjectDraftIssue struct {
 	UpdateProjectV2DraftIssue struct {
 		DraftIssue queries.DraftIssue `graphql:"draftIssue"`
 	} `graphql:"updateProjectV2DraftIssue(input:$input)"`
+}
+
+type DraftIssueQuery struct {
+	DraftIssueNode struct {
+		DraftIssue queries.DraftIssue `graphql:"... on DraftIssue"`
+	} `graphql:"node(id: $id)"`
 }
 
 type UpdateProjectV2FieldValue struct {
@@ -63,23 +72,26 @@ func NewCmdEditItem(f *cmdutil.Factory, runF func(config editItemConfig) error) 
 		Short: "Edit an item in a project",
 		Long: heredoc.Docf(`
 			Edit either a draft issue or a project item. Both usages require the ID of the item to edit.
-			
+
 			For non-draft issues, the ID of the project is also required, and only a single field value can be updated per invocation.
 
 			Remove project item field value using %[1]s--clear%[1]s flag.
 		`, "`"),
 		Example: heredoc.Doc(`
-			# edit an item's text field value
-			gh project item-edit --id <item-ID> --field-id <field-ID> --project-id <project-ID> --text "new text"
+			# Edit an item's text field value
+			$ gh project item-edit --id <item-id> --field-id <field-id> --project-id <project-id> --text "new text"
 
-			# clear an item's field value
-			gh project item-edit --id <item-ID> --field-id <field-ID> --project-id <project-ID> --clear
+			# Clear an item's field value
+			$ gh project item-edit --id <item-id> --field-id <field-id> --project-id <project-id> --clear
 		`),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.numberChanged = cmd.Flags().Changed("number")
+			opts.titleChanged = cmd.Flags().Changed("title")
+			opts.bodyChanged = cmd.Flags().Changed("body")
 			if err := cmdutil.MutuallyExclusive(
 				"only one of `--text`, `--number`, `--date`, `--single-select-option-id` or `--iteration-id` may be used",
 				opts.text != "",
-				opts.number != 0,
+				opts.numberChanged,
 				opts.date != "",
 				opts.singleSelectOptionID != "",
 				opts.iterationID != "",
@@ -89,7 +101,7 @@ func NewCmdEditItem(f *cmdutil.Factory, runF func(config editItemConfig) error) 
 
 			if err := cmdutil.MutuallyExclusive(
 				"cannot use `--text`, `--number`, `--date`, `--single-select-option-id` or `--iteration-id` in conjunction with `--clear`",
-				opts.text != "" || opts.number != 0 || opts.date != "" || opts.singleSelectOptionID != "" || opts.iterationID != "",
+				opts.text != "" || opts.numberChanged || opts.date != "" || opts.singleSelectOptionID != "" || opts.iterationID != "",
 				opts.clear,
 			); err != nil {
 				return err
@@ -123,7 +135,7 @@ func NewCmdEditItem(f *cmdutil.Factory, runF func(config editItemConfig) error) 
 	editItemCmd.Flags().StringVar(&opts.fieldID, "field-id", "", "ID of the field to update")
 	editItemCmd.Flags().StringVar(&opts.projectID, "project-id", "", "ID of the project to which the field belongs to")
 	editItemCmd.Flags().StringVar(&opts.text, "text", "", "Text value for the field")
-	editItemCmd.Flags().Float32Var(&opts.number, "number", 0, "Number value for the field")
+	editItemCmd.Flags().Float64Var(&opts.number, "number", 0, "Number value for the field")
 	editItemCmd.Flags().StringVar(&opts.date, "date", "", "Date value for the field (YYYY-MM-DD)")
 	editItemCmd.Flags().StringVar(&opts.singleSelectOptionID, "single-select-option-id", "", "ID of the single select option value to set on the field")
 	editItemCmd.Flags().StringVar(&opts.iterationID, "iteration-id", "", "ID of the iteration value to set on the field")
@@ -141,12 +153,12 @@ func runEditItem(config editItemConfig) error {
 	}
 
 	// update draft issue
-	if config.opts.title != "" || config.opts.body != "" {
+	if config.opts.titleChanged || config.opts.bodyChanged {
 		return updateDraftIssue(config)
 	}
 
 	// update item values
-	if config.opts.text != "" || config.opts.number != 0 || config.opts.date != "" || config.opts.singleSelectOptionID != "" || config.opts.iterationID != "" {
+	if config.opts.text != "" || config.opts.numberChanged || config.opts.date != "" || config.opts.singleSelectOptionID != "" || config.opts.iterationID != "" {
 		return updateItemValues(config)
 	}
 
@@ -156,13 +168,41 @@ func runEditItem(config editItemConfig) error {
 	return cmdutil.SilentError
 }
 
-func buildEditDraftIssue(config editItemConfig) (*EditProjectDraftIssue, map[string]interface{}) {
+func fetchDraftIssueByID(config editItemConfig, draftIssueID string) (*queries.DraftIssue, error) {
+	var query DraftIssueQuery
+	variables := map[string]interface{}{
+		"id": githubv4.ID(draftIssueID),
+	}
+
+	err := config.client.Query("DraftIssueByID", &query, variables)
+	if err != nil {
+		return nil, err
+	}
+
+	return &query.DraftIssueNode.DraftIssue, nil
+}
+
+func buildEditDraftIssue(config editItemConfig, currentDraftIssue *queries.DraftIssue) (*EditProjectDraftIssue, map[string]interface{}) {
+	input := githubv4.UpdateProjectV2DraftIssueInput{
+		DraftIssueID: githubv4.ID(config.opts.itemID),
+	}
+
+	if config.opts.titleChanged {
+		input.Title = githubv4.NewString(githubv4.String(config.opts.title))
+	} else if currentDraftIssue != nil {
+		// Preserve existing if title is not provided
+		input.Title = githubv4.NewString(githubv4.String(currentDraftIssue.Title))
+	}
+
+	if config.opts.bodyChanged {
+		input.Body = githubv4.NewString(githubv4.String(config.opts.body))
+	} else if currentDraftIssue != nil {
+		// Preserve existing if body is not provided
+		input.Body = githubv4.NewString(githubv4.String(currentDraftIssue.Body))
+	}
+
 	return &EditProjectDraftIssue{}, map[string]interface{}{
-		"input": githubv4.UpdateProjectV2DraftIssueInput{
-			Body:         githubv4.NewString(githubv4.String(config.opts.body)),
-			DraftIssueID: githubv4.ID(config.opts.itemID),
-			Title:        githubv4.NewString(githubv4.String(config.opts.title)),
-		},
+		"input": input,
 	}
 }
 
@@ -172,7 +212,7 @@ func buildUpdateItem(config editItemConfig, date time.Time) (*UpdateProjectV2Fie
 		value = githubv4.ProjectV2FieldValue{
 			Text: githubv4.NewString(githubv4.String(config.opts.text)),
 		}
-	} else if config.opts.number != 0 {
+	} else if config.opts.numberChanged {
 		value = githubv4.ProjectV2FieldValue{
 			Number: githubv4.NewFloat(githubv4.Float(config.opts.number)),
 		}
@@ -248,9 +288,19 @@ func updateDraftIssue(config editItemConfig) error {
 		return cmdutil.FlagErrorf("ID must be the ID of the draft issue content which is prefixed with `DI_`")
 	}
 
-	query, variables := buildEditDraftIssue(config)
+	// Fetch current draft issue to preserve fields that aren't being updated
+	var currentDraftIssue *queries.DraftIssue
+	var err error
+	if !config.opts.titleChanged || !config.opts.bodyChanged {
+		currentDraftIssue, err = fetchDraftIssueByID(config, config.opts.itemID)
+		if err != nil {
+			return err
+		}
+	}
 
-	err := config.client.Mutate("EditDraftIssueItem", query, variables)
+	query, variables := buildEditDraftIssue(config, currentDraftIssue)
+
+	err = config.client.Mutate("EditDraftIssueItem", query, variables)
 	if err != nil {
 		return err
 	}
