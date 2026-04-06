@@ -90,7 +90,7 @@ COMMIT_HASH=$(git rev-parse --short HEAD)
 PR_TITLE="$COMMIT_MSG"
 
 # ---- Check for existing PR --------------------------------------------------
-existing_pr=$(gh search prs --repo cli/cli --match title "$PR_TITLE" --json title --jq "map(select(.title == \"$PR_TITLE\") | .title) | length > 0")
+existing_pr=$(gh search prs --repo "${GITHUB_REPOSITORY:-cli/cli}" --match title "$PR_TITLE" --json title --jq "map(select(.title == \"$PR_TITLE\") | .title) | length > 0")
 
 if [[ "$existing_pr" == "true" ]]; then
   echo "Found an existing open PR titled '$PR_TITLE'. Skipping push/PR creation."
