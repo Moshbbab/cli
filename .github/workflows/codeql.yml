@@ -7,8 +7,6 @@ on:
     branches: [trunk]
     paths-ignore:
       - '**/*.md'
-  schedule:
-    - cron: "0 0 * * 0"
 
 permissions:
   actions: read  # for github/codeql-action/init to get workflow details
@@ -25,38 +23,29 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
         if: matrix.language == 'go'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           languages: ${{ matrix.language }}
           queries: security-and-quality
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           category: "/language:${{ matrix.language }}"
           upload: false
           output: sarif-results
 
-      - name: Filter SARIF for third-party code
-        if: matrix.language == 'go'
-        uses: advanced-security/filter-sarif@2da736ff05ef065cb2894ac6892e47b5eac2c3c0 # v1.1.0.1.1
-        with:
-          patterns: |
-            -third-party/**
-          input: sarif-results/${{ matrix.language }}.sarif
-          output: sarif-results/${{ matrix.language }}.sarif
-
       - name: Upload filtered SARIF
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           sarif_file: sarif-results/${{ matrix.language }}.sarif
           category: "/language:${{ matrix.language }}"
